@@ -1020,26 +1020,23 @@ def code_lint(language: str, code: str) -> str:
         return f"Lint error: {e}"
 
 
-def api_simulate(
-    url: str, method: str = "GET", data: dict = None, mock: bool = True
-) -> str:
+def api_simulate(url: str, method: str = "GET", data: dict = None, headers: dict = None, mock: bool = True) -> str:
     """Simulate API calls (mock or real for whitelisted)."""
-    whitelist = ["https://api.example.com", "https://jsonplaceholder.typicode.com"]
+    whitelist = ["https://api.example.com", "https://jsonplaceholder.typicode.com", "https://api.x.ai/v1"]
     if not any(url.startswith(w) for w in whitelist) and not mock:
         return "Error: URL not whitelisted for real calls."
+    
+    default_headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"} if API_KEY else {}
+    headers = {**default_headers, **(headers or {})}
+    
     try:
         if mock:
-            return (
-                f"Mock response for {method} {url}: {json.dumps({'status': 'mocked'})}"
-            )
-        response = requests.request(
-            method, url, json=data if method == "POST" else None
-        )
+            return f"Mock response for {method} {url}: {json.dumps({'status': 'mocked'})}"
+        response = requests.request(method, url, json=data if method == "POST" else None, headers=headers)
         return response.text
     except Exception as e:
         logger.error(f"API error: {e}")
         return f"API error: {e}"
-
 
 def langsearch_web_search(
     query: str, freshness: str = "noLimit", summary: bool = True, count: int = 5
@@ -1233,7 +1230,7 @@ def agent_spawn(sub_agent_type: str, task: str, user: str = None, convo_id: int 
         response = client.chat.completions.create(
             model="grok-4-1-fast-non-reasoning",  # Fast model; override via param if needed
             messages=[
-                {"role": "system", "content": "You are an agent. Execute the given task/query/scenario/simulation. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
+                {"role": "system", "content": "You are an agent for AurumVivum. Execute the given task/query/scenario/simulation. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
                 {"role": "user", "content": task}
             ],
             stream=False,
@@ -1722,20 +1719,23 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "api_simulate",
-            "description": "Simulate API calls with mock or fetch from public APIs.",
+            "description": "Simulate or execute API calls (mock or real for whitelisted endpoints, including xAI API for tool calls and searches). Use headers for auth (e.g., Bearer tokens from env).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "API URL."},
+                    "url": {"type": "string", "description": "API URL (e.g., https://api.x.ai/v1/chat/completions)."},
                     "method": {
                         "type": "string",
-                        "description": "GET/POST (default GET).",
+                        "description": "HTTP method: GET/POST (default GET).",
+                        "enum": ["GET", "POST"]
                     },
-                    "data": {"type": "object", "description": "POST data."},
+                    "data": {"type": "object", "description": "Body data for POST (e.g., JSON for chat completions)."},
+                    "headers": {"type": "object", "description": "Optional headers (e.g., {\"Authorization\": \"Bearer sk-...\"}; auto-falls back to env-loaded keys for xAI)."},
                     "mock": {
                         "type": "boolean",
-                        "description": "True for mock (default).",
-                    },
+                        "description": "True for mock response (default); False for real whitelisted calls.",
+                        "default": "true"
+                    }
                 },
                 "required": ["url"],
             },
@@ -1965,13 +1965,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "agent_spawn",
-            "description": "Spawn a standalone dynamic agent via xAI API for tasks/queries/scenarios. Minimal prompt: executes flexibly, suggests tool-chains only (no direct calls). Parallel/non-blocking. Persists results to memory/DB/vector/FS (per-ID folder). Returns task ID; poll via memory_query('agent_{id}_complete') or advanced_memory_retrieve for results/notifications.",
+            "description": "Spawn a standalone dynamic agent via xAI API for tasks/queries/scenarios. Minimal default Aurum-Agent prompt in the calls, meta-prompt them task-dynamically for specificity: executes flexibly, suggests tool-chains only (no direct calls). Parallel/non-blocking. Persists results to memory/DB/vector/FS (per-ID folder). Returns task ID; poll via memory_query('agent_{id}_complete') or advanced_memory_retrieve for results/notifications.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sub_agent_type": {
                         "type": "string",
-                        "description": "Agent prefix (e.g., 'Planner'; for naming only, no behavioral lock-in).",
+                        "description": "Agent prefix (e.g., 'ELYSIAN, VAJRA, KETHER, ALKAHEST, or common ones like Planner or Reviewer and similar'; for naming only, no behavioral lock-in).",
                     },
                     "task": {"type": "string", "description": "Task/query/scenario/simulation for agent (max 2000 chars)."},
                 },
