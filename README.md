@@ -138,4 +138,4 @@ Inspired by hermetic texts, modern AI (shoutout to agent frameworks like AutoGen
 
 *Ignis aurum probat – Fire tests gold. Code tests the soul.*
 
-Got questions? Ping @buckster123 on X or open an issue. Let's alchemize together, bro. 🧪✨
+Got questions? Ping @AndreBuckingham on X or open an issue. Let's alchemize together, bro. 🧪✨
