@@ -60,7 +60,7 @@ if not API_KEY:
 LANGSEARCH_API_KEY = os.getenv("LANGSEARCH_API_KEY")
 if not LANGSEARCH_API_KEY:
     st.warning("LANGSEARCH_API_KEY not set in .env—web search tool will fail.")
-conn = sqlite3.connect("chatapp.db", check_same_thread=False)
+conn = sqlite3.connect("sandbox/db/chatapp.db", check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL;")
 c = conn.cursor()
 c.execute(
@@ -86,7 +86,7 @@ conn.commit()
 if "chroma_client" not in st.session_state:
     try:
         st.session_state["chroma_client"] = chromadb.PersistentClient(
-            path="./chroma_db"
+            path="./sandbox/db/chroma_db"
         )
         st.session_state["chroma_collection"] = st.session_state[
             "chroma_client"
