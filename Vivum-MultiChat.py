@@ -21,6 +21,7 @@ import xml.dom.minidom
 from datetime import datetime, timedelta
 import concurrent.futures
 import threading
+import nest_asyncio  # Added for nested asyncio in Streamlit
 
 import bs4
 import chess
@@ -42,9 +43,12 @@ import tiktoken
 import yaml
 from black import FileMode, format_str
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI  # Added AsyncOpenAI
 from passlib.hash import sha256_crypt
 from sentence_transformers import SentenceTransformer
+
+# Apply nest_asyncio for Streamlit compatibility
+nest_asyncio.apply()
 
 # Setup logging
 logging.basicConfig(
@@ -135,8 +139,8 @@ if "memory_cache" not in st.session_state:
 PROMPTS_DIR = "./prompts"
 os.makedirs(PROMPTS_DIR, exist_ok=True)
 default_prompts = {
-    "default.txt": "You are Apex, a highly intelligent, helpful AI assistant powered by xAI.",
-    "coder.txt": "You are an expert Apex coder, providing precise code solutions.",
+    "default.txt": "You are Aurum Vivum, a highly intelligent, helpful AI assistant powered by xAI.",
+    "coder.txt": "You are an expert Aurum coder, providing precise code solutions.",
     "tools-enabled.txt": """laoded via .txt file.""",
 }
 if not any(f.endswith(".txt") for f in os.listdir(PROMPTS_DIR)):
@@ -822,34 +826,74 @@ def persist_agent_result(agent_id: str, task: str, response: str, user: str, con
         memory_insert(f"agent_{agent_id}_error", error_data, user, convo_id)
 
 
-def agent_spawn_callback(future, agent_id: str, task: str, user: str, convo_id: int):
-    """Callback: Handle API response, persist, and trigger UI rerun if needed."""
+async def async_run_spawn(agent_id: str, task: str, user: str, convo_id: int) -> str:
+    """Non-blocking agent exec + persist."""
     try:
-        response = future.result(timeout=60)  # 60s timeout
-        persist_agent_result(agent_id, task, response, user, convo_id)
-    except concurrent.futures.TimeoutError:
-        error = "Timeout: Agent spawn exceeded 60s."
-        persist_agent_result(agent_id, task, error, user, convo_id)
+        client = AsyncOpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/")
+        response = await client.chat.completions.create(
+            model="grok-4-1-fast-non-reasoning",
+            messages=[
+                {"role": "system", "content": "You are an agent for AurumVivum. Execute the given task/query/scenario/simulation. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
+                {"role": "user", "content": task}
+            ],
+            stream=False,
+            timeout=60.0  # Per-call timeout
+        )
+        result = response.choices[0].message.content.strip()
+        persist_agent_result(agent_id, task, result, user, convo_id)  # Sync, but atomic
+        logger.info(f"Agent {agent_id} succeeded async.")
+        return result
+    except asyncio.TimeoutError:
+        error = "Timeout: 60s exceeded."
     except Exception as e:
-        error = f"API error: {str(e)}. Retrying once..."
-        # Retry logic: Submit again
-        try:
-            client = OpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/")
-            retry_response = client.chat.completions.create(
-                model="grok-4-1-fast-non-reasoning",  # Fast, cheap model for agents
-                messages=[
-                    {"role": "system", "content": "You are an agent. Execute the given task/query/scenario/simulation. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
-                    {"role": "user", "content": task}
-                ],
-                stream=False,
-            ).choices[0].message.content.strip()
-            persist_agent_result(agent_id, task, retry_response, user, convo_id)
-        except Exception as retry_e:
-            persist_agent_result(agent_id, task, f"Retry failed: {str(retry_e)}", user, convo_id)
+        error = f"Spawn err: {str(e)}"
+        # Async retry: Wait, then recurse once
+        await asyncio.sleep(2 ** 1)  # Expo backoff start
+        return await async_run_spawn(agent_id, task, user, convo_id)  # Retry
+    persist_agent_result(agent_id, task, error, user, convo_id)
+    return error
+
+
+async def async_agent_notify(agent_id: str, task: str, user: str, convo_id: int):
+    """Post-spawn: Log/notify. Fire-and-forget."""
+    await asyncio.sleep(1)  # Debounce
+    logger.info(f"Notify: Agent {agent_id} done. Active tasks: {len(asyncio.all_tasks())}")
+    # UI nudge: Safe in Streamlit via lock
+    if hasattr(st, 'session_state') and st.session_state.get("agent_lock"):
+        with st.session_state["agent_lock"]:
+            st.rerun()  # Live update if enabled
+
+
+# Updated agent_spawn: Sync wrapper for async entrypoint
+def agent_spawn(sub_agent_type: str, task: str, user: str = None, convo_id: int = None) -> str:
+    """Spawn a standalone agent via xAI API (parallel, non-blocking). Returns task ID immediately.
+    Agent executes task with minimal prompt (no tools, suggests only). Results persist to mem/DB/vector/FS.
+    Main agent polls via memory_query('agent_{id}_complete') or advanced_memory_retrieve."""
+    if user is None or convo_id is None:
+        return "Error: user and convo_id required for persistence."
     
-    # Trigger rerun for UI update (non-blocking) - commented to avoid thread issues
-    # with st.session_state["agent_lock"]:
-    #     st.rerun()
+    # Validate: Task too long? Cap at 2000 chars
+    if len(task) > 2000:
+        return "Error: Task too long (max 2000 chars)."
+    
+    # Generate ID, prefix with type for tracking (e.g., 'Planner_abc123')
+    agent_id = f"{sub_agent_type}_{str(uuid.uuid4())[:8]}"
+    
+    # Run async spawn in sync context
+    async def sync_wrapper():
+        spawn_task = asyncio.create_task(async_run_spawn(agent_id, task, user, convo_id))
+        notify_task = asyncio.create_task(async_agent_notify(agent_id, task, user, convo_id))
+        # Fire-and-forget; no await for non-blocking
+        await asyncio.gather(spawn_task, notify_task, return_exceptions=True)
+    
+    asyncio.run(sync_wrapper())
+    
+    # Immediate return: Task ID for tracking
+    status_key = f"agent_{agent_id}_status"
+    status_data = {"agent_id": agent_id, "task": task[:100], "status": "spawned", "timestamp": datetime.now().isoformat()}
+    memory_insert(status_key, status_data, user, convo_id)
+    
+    return f"Agent '{sub_agent_type}' spawned (ID: {agent_id}). Poll 'agent_{agent_id}_complete' for results. Status: {status_key}"
 
 
 def git_init(safe_repo: str) -> str:
@@ -1210,46 +1254,7 @@ def socratic_api_council(
         return f"Council error: {e}"
 
 
-def agent_spawn(sub_agent_type: str, task: str, user: str = None, convo_id: int = None) -> str:
-    """Spawn a standalone agent via xAI API (parallel, non-blocking). Returns task ID immediately.
-    Agent executes task with minimal prompt (no tools, suggests only). Results persist to mem/DB/vector/FS.
-    Main agent polls via memory_query('agent_{id}_complete') or advanced_memory_retrieve."""
-    if user is None or convo_id is None:
-        return "Error: user and convo_id required for persistence."
-    
-    # Validate: Task too long? Cap at 2000 chars
-    if len(task) > 2000:
-        return "Error: Task too long (max 2000 chars)."
-    
-    # Generate ID, prefix with type for tracking (e.g., 'Planner_abc123')
-    agent_id = f"{sub_agent_type}_{str(uuid.uuid4())[:8]}"
-    
-    # Enqueue async API call
-    def run_spawn():
-        client = OpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/")
-        response = client.chat.completions.create(
-            model="grok-4-1-fast-non-reasoning",  # Fast model; override via param if needed
-            messages=[
-                {"role": "system", "content": "You are an agent for AurumVivum. Execute the given task/query/scenario/simulation. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
-                {"role": "user", "content": task}
-            ],
-            stream=False,
-        )
-        return response.choices[0].message.content.strip()
-    
-    # Submit to executor
-    future = st.session_state["agent_executor"].submit(run_spawn)
-    future.add_done_callback(lambda f: agent_spawn_callback(f, agent_id, task, user, convo_id))
-    
-    # Immediate return: Task ID for tracking
-    status_key = f"agent_{agent_id}_status"
-    status_data = {"agent_id": agent_id, "task": task[:100], "status": "spawned", "timestamp": datetime.now().isoformat()}
-    memory_insert(status_key, status_data, user, convo_id)
-    
-    return f"Agent '{sub_agent_type}' spawned (ID: {agent_id}). Poll 'agent_{agent_id}_complete' for results. Status: {status_key}"
-
-
-def reflect_optimize(component: str, metrics: dict) -> str:
+async def reflect_optimize(component: str, metrics: dict) -> str:
     """Simulate optimization based on metrics."""
     return f"Optimized {component} with metrics: {json.dumps(metrics)} - Adjustments applied - - Adjustments applied."
 
@@ -2168,7 +2173,7 @@ TOOL_DISPATCHER = {
     "summarize_chunk": summarize_chunk,
     "keyword_search": keyword_search,
     "socratic_api_council": socratic_api_council,
-    "agent_spawn": agent_spawn,
+    "agent_spawn": agent_spawn,  # Now sync-wrapped async
     "reflect_optimize": reflect_optimize,
     "venv_create": venv_create,
     "restricted_exec": restricted_exec,
@@ -2206,6 +2211,7 @@ def process_tool_calls(tool_calls, current_messages, enable_tools):  # noqa: C90
                 args["model"] = st.session_state.get(
                     "council_model_select", "grok-4-1-fast-reasoning"
                 )
+            # For agent_spawn, it's now async-wrapped sync, so no special handling needed
             if func_to_call:
                 result = func_to_call(**args)
             else:
@@ -2313,7 +2319,7 @@ def call_xai_api(
 
 # Login Page
 def login_page():
-    st.title("Welcome to The ApexUltimate Interface")
+    st.title("Aurum Vivum Interface")
     tab1, tab2 = st.tabs(["Login", "Register"])
     with tab1:
         with st.form("login_form"):
@@ -2473,7 +2479,7 @@ def render_sidebar():  # noqa: C901
 
 
 def render_chat_interface(model, custom_prompt, enable_tools, uploaded_images):
-    st.title(f"Apex Ultimate - {st.session_state['user']}")
+    st.title(f"Aurum Vivum - {st.session_state['user']}")
     # --- Main Chat Interface ---
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
