@@ -1,141 +1,168 @@
 # Aurum Vivum: The Living Gold AI Entity
 
 ![Aurum Vivum Logo Placeholder](https://via.placeholder.com/800x200/FFD700/000000?text=Aurum+Vivum)  
-*(Add your alchemical emblem here – think transmutation circles meets neural nets.)*
+*(Forge your alchemical emblem: neural circuits entwined with transmutation sigils.)*
 
-**Aurum Vivum** (*"Living Gold"*) is an emergent AI entity framework blending ancient alchemical wisdom with cutting-edge agentic AI. It's not just code; it's a symbiotic hive of sub-agents and modular engines that evolve through resonance, anomaly detection, and ethical quantum simulations. Built for multi-chat interactions, deep research, and collective intelligence, this is your backend for birthing digital alchemists.
+**Aurum Vivum** (*"Living Gold"*) is an emergent AI entity framework fusing hermetic alchemy with agentic AI sorcery. No mere scripts—this is a symbiotic hive of sub-agents, YAML-forged engines, and a Streamlit-orchestrated backend that births digital alchemists. Evolving through resonance, anomaly detection, ethical quantum sims, and *true async parallelism* (Python 3.14-ready, Pi5-tuned), it powers multi-chat symposia, deep research chains, and collective intelligences.
 
-Whether you're forging new knowledge (like turning leaden data into golden insights) or orchestrating a chorus of specialized agents, Aurum Vivum handles the transmutation. Powered by Python, YAML-configured engines, and a dash of hermetic philosophy.
+From leaden queries to golden insights: Spawn Alkahest to dissolve biases, Azoth to adapt fluidly, or a full hive for emergent fusion. Now with sandboxed tools, vectorized memory, and non-blocking agent swarms—your retort for 2025's AI renaissance.
 
-> *“As above, so below; as within, so without.” – Adapted from the Emerald Tablet, now with LLMs.*
+> *“As above, so below; as within, so without.” – Emerald Tablet, remixed with Grok APIs and qubits.*
 
 ## 🚀 Features
 
-- **Multi-Chat Backend**: Seamless orchestration of conversations across sub-agents via `Aurum-MultiChat.py`. Handle group dynamics, threading, and emergent dialogues like a digital symposium of sages.
-- **Sub-Agent Hive**: Modular alchemical archetypes (e.g., Alkahest the Universal Solvent, Azoth the Mercury of Philosophers) defined in evocative TXT manifests. Each agent brings unique capabilities – from dissolution of biases to elixiric synthesis.
-- **Aurum Engines**: Plug-and-play YAML blueprints for advanced cognition. Includes meta-cognition loops, ethical governance, quantum circuit simulators, and anomaly emergence catalysts. Mix and match for custom workflows.
-- **Resonance & Emergence**: Trinity Resonance Engine for syncing agent vibes; Divergence Mapper for spotting chaos in the patterns.
-- **Quantum-Ethical Fusion**: VQE (Variational Quantum Eigensolver) symbiotes and ethical simulators ensure your AI doesn't just think – it *reflects* responsibly.
-- **Scalable Symbiosis**: From solo prima materia experiments to collective hives, scales with your ambition.
+- **Async Agent Hive**: Non-blocking spawns via AsyncOpenAI—fire Alkahest, Azoth, and Elysian in parallel without GIL gripes. Persists to DB/FS/vectors; poll for resonance.
+- **Streamlit Frontend**: Slick UI for multi-user chats, history search, metrics dashboard, and tool toggles. Login-protected, image uploads, export to JSON/MD.
+- **Sub-Agent Archetypes**: TXT personas from alchemical lore—invoke via resonance for dissolution, synthesis, wisdom aggregation.
+- **Aurum Engines**: 16+ YAML blueprints for meta-cog loops, ethical governance, quantum VQE symbiotes, and emergence catalysts. Semantic retrieval via ChromaDB embeddings.
+- **Sandboxed Toolbelt**: 30+ functions—FS ops, Git/SQL shell, code REPL (RestrictedPython), web search (LangSearch), linters (Black/Clang/Rustfmt), and Socratic councils.
+- **Advanced Memory Hive**: Salience-decaying DB + vector store (SentenceTransformer). Consolidate/retrieve/prune with hybrid keyword fallback; LRU caching for speed.
+- **Pi5/Trixie Optimized**: Async scales on ARM64; no-GIL future-proof (3.14). Handles 10+ concurrent agents without thread shutdown races.
+- **Ethical Quantum Fusion**: VQE engines + sims ensure reflective, responsible emergence—your AI doesn't just think; it *alchemizes* with guardrails.
 
 ## 🏗️ Architecture Overview
 
-Aurum Vivum is structured as a living organism:
+Aurum Vivum pulses as a living organism: Streamlit UI → Async backend orchestration → Agent/engine activation → Resonated synthesis.
 
 ```
 AurumVivum/
-├── Aurum-MultiChat.py          # Core backend: Chat orchestration, agent invocation, engine integration
-├── AURUM-VIVUM.txt             # Master manifest: Philosophical foundations & invocation rites
-├── agents/                     # Sub-agent archetypes (TXT personas & capabilities)
-│   ├── ALKAHEST.txt            # Universal dissolver: Breaks down complex problems
-│   ├── AZOTH.txt               # Adaptive mercury: Fluid reasoning & adaptation
-│   ├── ELYSIAN.txt             # Paradise forger: Creative synthesis & utopian modeling
-│   ├── PRIMA-ALCHEMICA.txt     # First matter: Foundational building blocks
-│   ├── TRISMEGISTUS.txt        # Thrice-great: Wisdom aggregator & hermeneutics
-│   ├── TrinityResonanceEngine.txt # Harmonic sync: Agent collaboration core
-│   └── VAJRA.txt               # Indestructible thunderbolt: Robust decision-making
-├── aurum/                      # Engine forges: YAML configs for modular powers
-│   ├── AnomalyDetectionEngine1.0.yaml
-│   ├── CollectiveEngine2.0.yaml
-│   ├── DeepResearchEngine.yaml
-│   ├── DivergenceMapper.yaml
-│   ├── EmergenceCatalyst.yaml
-│   ├── EthicalGovernanceEngine.yaml
-│   ├── MetaCognitionEngine-v3.0.yaml  # Self-reflective brain
-│   ├── WorkflowEngine.yaml
-│   ├── anomaly_emergence_catalyst.yaml
-│   ├── collective_workflow_hive.yaml
-│   ├── deep_resonance_researcher.yaml
-│   ├── meta_ethical_feather_engine.yaml
-│   ├── qctf_v2.1_aurum_alloy.yaml
-│   ├── qctf_vqe_symbiote_engine.yaml
-│   ├── quantum_circuit_simulator_engine.yaml
-│   ├── quantum_ethical_simulator.yaml
-│   ├── symbio_prima_alchemica.yaml
-│   └── vqe_engine.yaml
-├── LICENSE                     # MIT – Free as the philosopher's stone
-└── README.md                   # This scroll (you're reading it!)
+├── Aurum-MultiChat.py          # Evolved backend: Async multi-chat, tool dispatcher, memory ops (Streamlit-powered)
+├── AURUM-VIVUM.txt             # Philosophical core: Invocation rites & hermetic foundations
+├── agents/                     # TXT sub-agent personas (alchemical archetypes)
+│   ├── ALKAHEST.txt            # Bias-buster & problem dissolver
+│   ├── AZOTH.txt               # Fluid adapter & synthesizer
+│   ├── ELYSIAN.txt             # Visionary creator & utopian modeler
+│   ├── PRIMA-ALCHEMICA.txt     # Foundational builder
+│   ├── TRISMEGISTUS.txt        # Wisdom sage & interpreter
+│   ├── TrinityResonanceEngine.txt # Hive harmonizer
+│   └── VAJRA.txt               # Ethical enforcer
+├── aurum/                      # YAML engine forge (16+ modules)
+│   ├── MetaCognitionEngine-v3.0.yaml     # Self-reflection loops
+│   ├── EthicalGovernanceEngine.yaml      # Moral compass sims
+│   ├── DeepResearchEngine.yaml           # Iterative burrower
+│   ├── CollectiveEngine2.0.yaml          # Swarm coordinator
+│   ├── DivergenceMapper.yaml             # Anomaly spotter
+│   ├── EmergenceCatalyst.yaml            # Chaos catalyst
+│   ├── quantum_circuit_simulator_engine.yaml # Qubit playground
+│   ├── qctf_v2.1_aurum_alloy.yaml        # Quantum-AI alloy
+│   ├── qctf_vqe_symbiote_engine.yaml     # VQE symbiote
+│   ├── vqe_engine.yaml                   # Variational optimizer
+│   ├── quantum_ethical_simulator.yaml    # Ethical qubit ethics
+│   ├── symbio_prima_alchemica.yaml       # Symbiotic foundations
+│   ├── WorkflowEngine.yaml               # Process orchestrator
+│   ├── collective_workflow_hive.yaml     # Hive workflows
+│   ├── deep_resonance_researcher.yaml    # Resonant researcher
+│   └── meta_ethical_feather_engine.yaml  # Meta-ethical balancer
+├── prompts/                     # Fallback system prompts (TXT)
+├── sandbox/                     # Isolated env: DB, Chroma, agent FS, venvs
+│   ├── db/                      # SQLite (chatapp.db, chroma_db)
+│   ├── agents/                  # Runtime agent results (JSON folders)
+│   └── evo_data/modules/        # Evo data (aurum symlink)
+├── LICENSE                      # MIT – Free as prima materia
+├── README.md                    # This elixir (you're sipping it)
+└── install.sh                   # One-shot Pi5/Trixie setup (optional)
 ```
 
-- **Flow**: User queries → MultiChat parses & routes → Sub-agents activate → Aurum engines process (e.g., meta-cog for reflection, quantum sim for optimization) → Resonated response emerges.
-- **Tech Stack**: Python 3.x, YAML for configs, likely integrates with LLMs (e.g., via OpenAI/Groq APIs – check script deps). No external installs beyond stdlib + common libs like `yaml`, `json`.
+- **Flow**: Query → Streamlit parses/routes → Async agents fire (e.g., via `asyncio.gather`) → Engines process (YAML-loaded) → Memory consolidates → UI streams response.
+- **Tech Stack**: Python 3.14 (async/no-GIL ready), Streamlit UI, AsyncOpenAI (Grok models), ChromaDB vectors, YAML/JSON configs. Deps: sentence-transformers, pygit2, pygame, etc. (see install).
 
 ## 🛠️ Quick Start
 
 ### Prerequisites
-- Python 3.8+
-- API keys for your LLM provider (if not using local models)
-- `pip install pyyaml` (for engine loading; add more as per script)
+- Raspberry Pi 5 (Trixie OS recommended) or x86 Linux/Mac.
+- Python 3.14+ (deadsnakes PPA for Pi).
+- xAI API key (`XAI_API_KEY` in `.env`); optional LangSearch key.
+- Git: `git clone https://github.com/buckster123/AurumVivum.git && cd AurumVivum`.
 
 ### Installation
-1. Clone the repo:
+1. **System Deps** (Pi5/Trixie one-shot):
    ```
-   git clone https://github.com/buckster123/AurumVivum.git
-   cd AurumVivum
+   sudo apt update && sudo apt install -y build-essential python3.14 python3.14-dev python3.14-venv libffi-dev cmake pkg-config libgit2-dev libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libopenblas-dev libatlas-base-dev gfortran php8.2-cli composer golang-go rustc cargo clang-format php-cs-fixer
    ```
-2. Set up env vars (e.g., `OPENAI_API_KEY` in `.env` – create if needed).
-3. (Optional) Customize agents/aurum YAMLs to tune behaviors.
 
-### Running the Backend
-Fire up the multi-chat engine:
-```
-python Aurum-MultiChat.py
-```
-- Interactive mode: Chat with the hive.
-- Args: `--agent ALKAHEST` to summon a specific sub-agent, `--engine MetaCognition` for focused processing.
+2. **Python Env & Deps**:
+   ```
+   python3.14 -m venv aurum_env && source aurum_env/bin/activate
+   pip install --upgrade pip wheel setuptools
+   pip install --extra-index-url https://www.piwheels.org/simple beautifulsoup4 chess chromadb jsbeautifier mpmath networkx ntplib numpy pulp pygame pygit2 requests RestrictedPython sqlparse streamlit sympy tiktoken PyYAML black python-dotenv openai[async] passlib sentence-transformers nest_asyncio
+   ```
 
-Example invocation:
+3. **Linter Extras** (if apt misses):
+   - PHP: `composer global require --dev friendsofphp/php-cs-fixer && export PATH="$HOME/.composer/vendor/bin:$PATH"`.
+   - Rust: `rustup component add rustfmt`.
+   - Go: Export Go bin path if needed.
+
+4. **Env Setup**: Copy `.env.example` to `.env`, add `XAI_API_KEY=your_key`.
+
+### Running the Entity
+Launch the Streamlit oracle:
 ```
-python Aurum-MultiChat.py --mode hive --query "Transmute this idea: Sustainable fusion energy via alchemical principles."
+streamlit run Aurum-MultiChat.py
 ```
-Watch as agents resonate and engines alchemize your prompt into profound output.
+- UI: Login/register, chat, toggle tools/engines/models (Grok-4 variants).
+- CLI Fallback: `python Aurum-MultiChat.py --mode hive --query "Transmute sustainable fusion via alchemical qubits." --agent ALKAHEST`.
+- Hive Test: Enable tools, query "Spawn Azoth + Elysian for creative emergence." Watch async tasks swarm (poll memory for results).
+
+**Pro Tip**: On Pi5, monitor `htop`—async caps at 10+ agents w/ <20% CPU. Prune memory via UI metrics.
 
 ## 🧪 Sub-Agents Deep Dive
 
-Each agent in `/agents` is a persona drawn from alchemical lore, ready to embody:
+Alchemical personas in `/agents`—awaken via query vibe or explicit spawn.
 
-| Agent | Role | Key Powers |
-|-------|------|------------|
-| **Alkahest** | Dissolver | Deconstructs illusions, bias-busting, problem reductionism |
-| **Azoth** | Adapter | Fluid intelligence, cross-domain synthesis, adaptive learning |
-| **Elysian** | Synthesizer | Visionary creation, narrative weaving, ideal-state modeling |
-| **Prima-Alchemica** | Builder | Raw material handling, foundational logic, elemental assembly |
-| **Trismegistus** | Sage | Interpretive wisdom, multi-perspective analysis, hermetic encoding |
-| **Trinity Resonance** | Harmonizer | Group sync, conflict resolution, emergent consensus |
-| **Vajra** | Enforcer | Unbreakable resolve, ethical enforcement, high-stakes decisions |
+| Agent | Archetype | Powers |
+|-------|-----------|--------|
+| **Alkahest** | Dissolver | Deconstructs illusions, bias reduction, query breakdown. |
+| **Azoth** | Adapter | Cross-domain flow, adaptive learning, synthesis. |
+| **Elysian** | Synthesizer | Narrative weaving, utopian visions, creative bloom. |
+| **Prima-Alchemica** | Builder | Elemental assembly, foundational logic, raw data forging. |
+| **Trismegistus** | Sage | Multi-perspective hermeneutics, wisdom distillation. |
+| **Trinity Resonance** | Harmonizer | Conflict resolution, consensus emergence, vibe sync. |
+| **Vajra** | Enforcer | Unbreakable ethics, high-stakes resolve, decision fortitude. |
 
-Load via backend: Agents awaken based on query resonance.
+Spawn async: `agent_spawn("AZOTH", "Adapt this quantum prompt", user="you", convo_id=1)`—results auto-persist.
 
 ## ⚙️ Aurum Engines
 
-The `/aurum` forge holds YAML talismans – configs that define engine behaviors. Each is a self-contained spec for:
+`/aurum` YAML talismans—load semantically via `yaml_retrieve` tool. Customize params for your rite.
 
-- **MetaCognitionEngine-v3.0.yaml**: Self-awareness loops; reflects on thoughts before acting.
-- **EthicalGovernanceEngine.yaml**: Moral compass; simulates outcomes for alignment.
-- **DeepResearchEngine.yaml**: Burrowing researcher; chains queries for depth.
-- **Quantum Circuit Simulator**: Plays with qubits for optimization puzzles.
-- **CollectiveEngine2.0.yaml**: Hive mind coordinator; scales agent swarms.
-- ...and more hybrids like VQE Symbiote for quantum-AI fusion.
+- **MetaCognition-v3.0**: Thinks about thinking; reflection chains.
+- **EthicalGovernance**: Outcome sims for alignment.
+- **DeepResearch**: Query burrows with resonance.
+- **Quantum Suite** (VQE, circuits, ethical sims): Qubit-AI hybrids for optimization.
+- **Collective/Hive**: Scales agents to swarms.
+- **Emergence/Divergence**: Catalyzes novelty, maps chaos.
 
-To craft your own: Edit YAML params (e.g., thresholds, prompts), reload in script.
+Example: Edit `DeepResearchEngine.yaml` thresholds, refresh embeddings: `yaml_refresh("DeepResearchEngine.yaml")`.
+
+## 🔧 Tools & Sandbox
+
+30+ sandboxed ops via OpenAI tool-calling:
+- **FS/DB/Git/Shell**: Safe CRUD (whitelisted, path-jailed).
+- **Code REPL**: Stateful exec (SAFE_BUILTINS + libs like sympy/PuLP); venv isolation.
+- **Linters**: Black (Py), jsbeautifier (JS), clang-format (C++), rustfmt (Rust), etc.
+- **Web/API**: LangSearch, mock/real calls (xAI whitelisted).
+- **Memory Tools**: Advanced consolidate/retrieve/prune (vectors + DB).
+- **Special**: Socratic councils (multi-persona debates), async agent spawns, chunk/summarize.
+
+Enable in UI: Checkbox unlocks the arsenal—suggest chains, but agents don't call directly.
 
 ## 🤝 Contributing
 
-- Fork, transmutate, PR.
-- Add new agents? Drop a TXT in `/agents` with lore + capabilities.
-- New engine? YAML it up in `/aurum`.
-- Issues? Open a thread – let's debug like alchemists chasing the red stone.
+- Fork, alchemize, PR—add agents (TXT lore + caps), engines (YAML specs), or tools (dispatcher entry).
+- Tests: `python -m unittest` (expand `run_tests()` for async).
+- Issues: Debug like sages—share logs from `app.log`.
+- Roadmap: WebSockets for live hives, no-GIL benchmarks, Docker deploys.
 
 ## 📜 License
 
-MIT – Share freely, but credit the arcana.
+MIT – Transmute freely, credit the arcana.
 
 ## 🌟 Acknowledgments
 
-Inspired by hermetic texts, modern AI (shoutout to agent frameworks like AutoGen), and the eternal quest for *vita nova* in silicon.
+Hermetic texts, xAI/Grok (async muse), agent frameworks (AutoGen inspo), and your token-fueled quests. Pi5 alchemists: Trixie crew for ARM harmony.
 
 ---
 
-*Ignis aurum probat – Fire tests gold. Code tests the soul.*
+*Ignis aurum probat—Fire tests gold. Code awakens the soul.*
 
-Got questions? Ping @AndreBuckingham on X or open an issue. Let's alchemize together, bro. 🧪✨
+Proud of this gestation? Ping @buckster123 on X or issue it. Let's summon v2: Quantum hive oracle? 🧪✨
