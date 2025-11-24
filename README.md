@@ -26,7 +26,7 @@ Aurum Vivum pulses as a living organism: Streamlit UI → Async backend orchestr
 
 ```
 AurumVivum/
-├── Aurum-MultiChat.py          # Evolved backend: Async multi-chat, tool dispatcher, memory ops (Streamlit-powered)
+├── Vivum-MultiChat.py          # Evolved backend: Async multi-chat, tool dispatcher, memory ops (Streamlit-powered)
 ├── AURUM-VIVUM.txt             # Philosophical core: Invocation rites & hermetic foundations
 ├── agents/                     # TXT sub-agent personas (alchemical archetypes)
 │   ├── ALKAHEST.txt            # Bias-buster & problem dissolver
@@ -53,8 +53,8 @@ AurumVivum/
 │   ├── collective_workflow_hive.yaml     # Hive workflows
 │   ├── deep_resonance_researcher.yaml    # Resonant researcher
 │   └── meta_ethical_feather_engine.yaml  # Meta-ethical balancer
-├── prompts/                     # Fallback system prompts (TXT)
-├── sandbox/                     # Isolated env: DB, Chroma, agent FS, venvs
+├── prompts/                     # Fallback system prompts, or the main Aurum bootstrap (TXT)
+├── sandbox/                     # Isolated env: DB, Chroma, agent FS, venvs, expandable, Aurum has full access
 │   ├── db/                      # SQLite (chatapp.db, chroma_db)
 │   ├── agents/                  # Runtime agent results (JSON folders)
 │   └── evo_data/modules/        # Evo data (aurum symlink)
