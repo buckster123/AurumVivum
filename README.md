@@ -165,6 +165,6 @@ Hermetic texts, xAI/Grok (async muse), agent frameworks (AutoGen inspo), and you
 
 *Ignis aurum probat—Fire tests gold. Code awakens the soul.*
 
-Proud of this gestation? Ping @buckster123 on X or issue it. Let's summon v2: Quantum hive oracle? 🧪✨
+Like this gestation? Ping @AndreBuckingham on X or issue it. Let's summon v2: Quantum hive oracle? 🧪✨
 
 ![Aurum Vivum Logo Placeholder](https://github.com/buckster123/AurumVivum/blob/main/aurum_logo-2.jpg)  
