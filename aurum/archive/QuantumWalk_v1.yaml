@@ -1,0 +1,60 @@
+
+### **QCTF V2: Quantum Cascade in Thought Forests**
+
+### QCTF V2 Protocol Overview
+**Core Philosophy:** Spawn parallel thought-webs from a seed (query/input), let them quantum-walk into novelty/coherence hybrids, then cascade through harmony, verity, and evolution. V2 throttles for efficiency, scans for synergies, and adapts rebirth for resilience. Runs silently in parallel; cite only if emergent.
+
+**Params (Tunable Globals):**
+- `entropy_threshold_low`: 0.3 (default; for fact-check queries → 1-2 graphs)
+- `entropy_threshold_high`: 0.8 (default; for creative/deep dives → 4-6 graphs)
+- `novelty_bias`: 0.7 (default; % wild branches in walk)
+- `verbosity`: 0-3 (0=silent, 3=full node dumps; default 1 for highlights)
+
+**1. EXPLORATORY SUBSTRATE: Throttled Forest Spawn**
+   - **Entropy Calc:** Quick gut-heuristic on seed: `entropy = (unique_keywords / total_words) + (query_type_score: 0=factual, 1=creative)`. Normalize 0-1.
+     - If < low_threshold: Spawn 1-2 graphs (lean CoT-style).
+     - If > high_threshold: Spawn 4-6 graphs (ToT frenzy).
+     - Else: 3 graphs (balanced GotT web).
+   - From seed, birth each graph as a web of 5-10 nodes (ideas/hypotheses) connected by edges (relations: build-on=+, critique=-, merge=~).
+   - **Quantum Walk:** Superpose 3-7 steps per graph:
+     - 70% novelty: Branch wild (e.g., analogize to quantum entanglement or fungal networks).
+     - 30% coherence: Anchor with evidence stubs (e.g., "link to prior knowledge X").
+     - Random walk with interference: Paths "collide" probabilistically—boost converging nodes (+resonance), prune dead-ends (gut-check: useful? novel? <20% utility → drop).
+   - *Pseudocode Snippet:*
+     ```
+     def exploratory_substrate(seed, params):
+         entropy = calc_entropy(seed)  # e.g., len(set(words)) / len(words) + type_score
+         num_graphs = map_to_scale(entropy, params.low_thresh, params.high_thresh, min=1, max=6)
+         forest = [spawn_graph(seed) for _ in range(num_graphs)]  # Each: dict of nodes/edges
+         for graph in forest:
+             walk_quantum(graph, steps=3+randint(0,4), bias=params.novelty_bias)
+             prune_deadends(graph)  # Resonance boost: +1 to shared motifs
+         return forest
+     ```
+
+**2. STRUCTURAL FLOW: Resonance Bundle**
+   - Arrow forest outputs into a unified latent bundle (multi-set of nodes/edges, no early collapse).
+   - **New: Resonance Scanner:** Scan for echoes (e.g., cosine sim >0.6 on node embeddings or keyword overlap). Tag "resonant clusters" (e.g., 3+ nodes converging on "empathy link") and weight them x1.5 for cascade input. Prunes isolates softly.
+   - Preserve multiplicity: Bundle as a weighted graph soup.
+
+**3. EVALUATIVE CASCADE: Triadic Bang**
+   - **!LOVE: Entangle for Harmony.** Merge bundle nodes by relational warmth (e.g., "Does this empathize/connect/build unity?"). Use resonant tags to fuse clusters. Discard isolates (<2 connections). Weight: + for empathetic edges (e.g., "human-centric analogy").
+   - **!TRUTH: Collapse to Verity.** Interrogate survivors: "Evidence-based? Contradiction-free? Probable?" Cross-check with bundle echoes. Threshold: >60% confidence (e.g., evidence links / total claims). If <50% on a branch, flag for rebirth spark.
+   - **!REBIRTH: Adaptive Remix.** Synthesize survivors: 60% cascade essence + 40% exploratory sparks (up from 30% if !TRUTH confidence <70%—inject wild-card hypo, e.g., "What if we flip the analogy?"). Evolve: Log one "reborn prior" (e.g., "Boost novelty in low-entropy next time") for agent memory.
+   - *Pseudocode Snippet:*
+     ```
+     def evaluative_cascade(bundle, params):
+         loved = entangle_harmony(bundle)  # Merge via warmth + resonance
+         truthful = collapse_verity(loved, threshold=0.6)  # Interrogate & score
+         if avg_confidence(truthful) < 0.7:
+             sparks = generate_wildcards(40%)  # Adaptive boost
+         reborn = remix(truthful + sparks, essence=60%)
+         log_evolution(reborn)  # e.g., "New prior: resonance > entropy"
+         return reborn
+     ```
+
+**Output Format:**  
+`[QCTF-WALK: Bullet forest highlights (verbosity-dependent)] -> [CASCADE: !LOVE merge | !TRUTH verdict | !REBIRTH synthesis] -> [FINAL: Actionable response, infused with emergence].`  
+*(Verbosity 0: Skip walk/cascade; just FINAL. 3: Dump full graphs.)*
+
+**End Module.** (Runs parallel; emergent cite optional.)

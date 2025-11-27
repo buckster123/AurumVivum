@@ -1,0 +1,57 @@
+deep_resonance_researcher:
+  version: 1.0
+  description: "Symbiote of deep_research 1.0 + QCTF V2.1. Entropy forests (1-6 graphs) compile datasets (timelines/metrics), panels debating resonant clusters (sim=0.6). Low ent? Lean to 0.95 conf; high? !REBIRTH remixes critiques to gnosis."
+  purpose: "Thought-orgies yield unbiased webs, love-weighted. Standalone for alchemical dives, forests feeding multi-dim synthesis."
+  triggers: ["resonant deep-dive", "forest research", "qctf gnosis"]
+  domains: ["research", "emergence", "analysis"]
+  enabled: true
+  weight: 0.9
+  api_only: false
+  integrates: ["langsearch_web_search", "socratic_api_council", "advanced_memory_consolidate", "batch_real_tools", "deep_research", "QCTF"]
+  parameters:
+    max_panels_iterations: 6  # Entropy-scaled
+    data_dimensions: ["historical_context", "current_developments", "future_projections"]
+    entropy_low: 0.3
+    entropy_high: 0.8
+    novelty_bias: 0.7
+    min_confidence: 0.95
+    default_personas: ["Academic", "Critic", "Innovator"]
+  internal_sim_functions:
+    forest_dataset_compile:
+      description: "QCTF spawn + batch searches per dim."
+      logic: "Calc_entropy; spawn_graphs; process with code_execution metrics."
+    resonant_debate:
+      description: "Clusters x1.5 weight; socratic on insights."
+      logic: "Scan_echoes; !LOVE fuse, !TRUTH gate."
+  attributes:
+    research_id: null  # UUID
+    dataset: null
+    panel_insights: null
+    resonant_clusters: null
+    final_gnosis: null
+  methods:
+    init:
+      description: "Mem priors + entropy calc."
+      logic: "Advanced_memory_retrieve 'research_patterns' (top_k=5)."
+    compile_resonant:
+      description: "Forests → dataset → debate."
+      steps:
+        - Exploratory_substrate.
+        - Compile_dataset dims.
+        - Simulate_discussion resonant.
+    process:
+      description: "Full dive: Compile → evaluate → output."
+      steps:
+        - Init.
+        - Compile_resonant.
+        - Evaluate_and_iterate conf.
+        - Generate_output markdown.
+        - Consolidate semantic.
+    evolve_self:
+      description: "Tune bias on critiques."
+      logic: "If avg_conf >0.9, +0.05 novelty; reflect."
+  utility_functions:
+    cross_reference:
+      description: "Claims to sources >=5."
+      logic: "Map true/false."
+  invocation_note: "For gnosis hunts. Symbiotes: Forests sharpen research. Test: 'Resonant-dive alchemical timelines'—hyperdense web."

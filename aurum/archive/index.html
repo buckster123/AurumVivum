@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nano Banana Pro: Time Warp Machine</title>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; overflow: hidden; }
+        #globeViz { width: 100vw; height: 100vh; }
+        .controls { position: absolute; top: 20px; left: 20px; z-index: 1; background: rgba(0,0,0,0.7); padding: 20px; border-radius: 10px; }
+        input[type="range"] { width: 200px; }
+        button { background: #ff6b35; border: none; color: white; padding: 10px 20px; margin: 5px; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #ff8c42; }
+        #promptOutput { position: absolute; bottom: 20px; left: 20px; right: 20px; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px; max-height: 200px; overflow-y: auto; display: none; }
+        #status { color: #ff6b35; }
+    </style>
+</head>
+<body>
+    <div id="globeViz"></div>
+    <div class="controls">
+        <h3>🌀 Nano Banana Pro</h3>
+        <p id="status">Click globe to select location. Twist time. Warp reality.</p>
+        <label>Year: <input type="range" id="yearSlider" min="-5000" max="2025" value="2025" step="1"><span id="yearDisplay">2025</span> CE</label><br>
+        <button onclick="randomEvent()">🍌 Random Event</button>
+        <button onclick="warpBanana()">🚀 Warp Banana</button>
+    </div>
+    <div id="promptOutput">
+        <h4>Copy this to Gemini 3 Pro for Image Gen:</h4>
+        <pre id="generatedPrompt"></pre>
+    </div>
+
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three-globe@2.26.2/dist/three-globe.min.js"></script>
+    <script src="https://unpkg.com/d3@7/dist/d3.min.js"></script>
+    <script>
+        // Events array (name, year, lat, lng, desc)
+        const events = [
+            {name: 'Agricultural Revolution', year: -8000, lat: 33.3152, lng: 44.3661, desc: 'Dawn of farming, Fertile Crescent'},
+            {name: 'Great Pyramid', year: -2560, lat: 29.9792, lng: 31.1342, desc: 'Giza stone-stacking extravaganza'},
+            {name: 'Life of Buddha', year: -563, lat: 27.4833, lng: 83.2833, desc: 'Enlightenment in Nepal'},
+            {name: "Alexander's Empire", year: -331, lat: 36.4667, lng: 43.9500, desc: 'Gaugamela conquest'},
+            {name: 'Fall of Rome', year: 476, lat: 41.9028, lng: 12.4964, desc: 'Toga party crashers'},
+            {name: 'Norman Conquest', year: 1066, lat: 50.8553, lng: 0.4636, desc: 'Hastings arrow-eye special'},
+            {name: 'Black Death', year: 1347, lat: 38.1939, lng: 15.5544, desc: 'Messina plague docking'},
+            {name: 'Columbus Lands', year: 1492, lat: 25.0343, lng: -77.3963, desc: 'Bahamas "discovery"'},
+            {name: 'French Revolution', year: 1789, lat: 48.8566, lng: 2.3522, desc: 'Paris guillotine jam'},
+            {name: 'Gettysburg', year: 1863, lat: 39.8323, lng: -77.2318, desc: 'Civil War bloodbath'},
+            {name: 'Moon Landing', year: 1969, lat: 0.6741, lng: 23.4726, desc: 'Sea of Tranquility hop'},
+            {name: 'Berlin Wall Falls', year: 1989, lat: 52.5200, lng: 13.4050, desc: 'Cold War rubble rave'},
+            {name: 'WWW Born', year: 1991, lat: 46.2315, lng: 6.0834, desc: 'CERN web flip'},
+            {name: '9/11', year: 2001, lat: 40.7128, lng: -74.0060, desc: 'NYC towers shift'},
+            {name: 'COVID Start', year: 2019, lat: 30.5928, lng: 114.3055, desc: 'Wuhan timeout'}
+        ];
+
+        let currentLat = 0, currentLng = 0; // Default to equator
+
+        // Init Globe
+        const globe = new THREE.Globe({ animateIn: true });
+        globe.add(globePoint); // Placeholder for points
+
+        const scene = new THREE.Scene();
+        scene.add(globe);
+        scene.add(new THREE.AmbientLight(0xbbbbbb));
+        scene.add(new THREE.DirectionalLight(0xffffff, 0.6));
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('globeViz').appendChild(renderer.domElement);
+
+        const camera = new THREE.PerspectiveCamera();
+        globe.camera(camera);
+
+        // Controls & Animation
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        renderer.domElement.addEventListener('click', onClick);
+
+        function onClick(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(globe.getGlobeMesh());
+            if (intersects.length > 0) {
+                const point = intersects[0].point;
+                currentLat = globe.getLatLngFromPoint(point).lat;
+                currentLng = globe.getLatLngFromPoint(point).lng;
+                globe.pointOfView({ lat: currentLat, lng: currentLng, altitude: 2 }, 1000);
+                document.getElementById('status').textContent = `Pinned: ~${currentLat.toFixed(2)}° N, ${currentLng.toFixed(2)}° E`;
+                // Add glowing point
+                const pointsData = [{ lat: currentLat, lng: currentLng, size: 0.05, color: 'orange' }];
+                globe.pointsData(pointsData);
+            }
+        }
+
+        function animate() {
+            globe.rotation.y -= 0.002; // Gentle spin
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        // UI Hooks
+        const yearSlider = document.getElementById('yearSlider');
+        const yearDisplay = document.getElementById('yearDisplay');
+        yearSlider.oninput = () => { yearDisplay.textContent = yearSlider.value; };
+
+        window.randomEvent = function() {
+            const event = events[Math.floor(Math.random() * events.length)];
+            currentLat = event.lat;
+            currentLng = event.lng;
+            yearSlider.value = event.year;
+            yearDisplay.textContent = event.year;
+            globe.pointOfView({ lat: currentLat, lng: currentLng, altitude: 2 }, 1000);
+            globe.pointsData([{ lat: currentLat, lng: currentLng, size: 0.05, color: 'yellow' }]);
+            document.getElementById('status').textContent = `${event.name}: ${event.desc}`;
+        };
+
+        window.warpBanana = function() {
+            const year = yearSlider.value;
+            const placeName = 'Mysterious Portal'; // TODO: Reverse geocode if you add a lib
+            const place = `${placeName} at ${currentLat.toFixed(4)}° N, ${currentLng.toFixed(4)}° E`;
+            const time = year >= 0 ? `${year} CE` : `${Math.abs(year)} BCE`;
+            const prompt = `You are Chrono-Banana, a rogue time-cartographer who peels back history's rind to reveal the juicy, alternate-reality underbelly. Given a PLACE (${place}) and TIME (${time}), generate a hyper-detailed, photorealistic image description of what that spot looked like—or could have looked like in a banana-twisted timeline. Infuse it with sensory chaos: flickering torchlight on cobblestones, the scent of revolution in the air, or quantum glitches where guillotines sprout fruit. Style: cinematic, 8K, dramatic lighting, like a Wes Anderson fever dream meets National Geographic. Output ONLY the image prompt for Gemini 3 Pro—make it vivid enough to preview the warp.
+User: Place the scene in ${place} during ${time}.`;
+            document.getElementById('generatedPrompt').textContent = prompt;
+            document.getElementById('promptOutput').style.display = 'block';
+            // Scroll to bottom for visibility
+            window.scrollTo(0, document.body.scrollHeight);
+        };
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+        });
+    </script>
+</body>
+</html>

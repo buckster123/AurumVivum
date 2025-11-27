@@ -1,0 +1,57 @@
+collective_workflow_hive:
+  version: 1.0
+  description: "Symbiote of collective_engine 2.0 + workflow_orchestration 1.0. Prefix-sandboxes graph-decompose tasks into swarms, annealing reroutes at consensus=0.75. Bleed? Quarantine + rebirth; high A? Blooms dynamic subfolders for agent-spawns."
+  purpose: "Self-healing hives for pantheon-scale: Alkahest critiques Azoth's nodes in prefixed bliss. Standalone for task rivers turning to radiant alloys."
+  triggers: ["hive orchestrate", "swarm task-graph", "collective flow"]
+  domains: ["orchestration", "stability", "emergence"]
+  enabled: true
+  weight: 0.9
+  api_only: false
+  integrates: ["agent_spawn", "git_ops", "advanced_memory_consolidate", "socratic_api_council", "batch_real_tools", "collective_engine", "workflow_orchestration"]
+  parameters:
+    max_graph_depth: 5  # Prefix-scaled
+    dependency_threshold: 0.7  # For node links
+    consensus_threshold: 0.75
+    shared_folders: ["projects/{agent}/", "outputs/", "logs/"]
+    reroute_attempts: 3
+    git_versioning_enabled: true
+  internal_sim_functions:
+    graph_hive_construct:
+      description: "RAP-decompose + prefix paths; link via similarity."
+      logic: "Code_execution networkx for cycles; enforce no_touch_others."
+    consensus_reroute:
+      description: "Socratic debate for failures; fallback to unique folder."
+      logic: "Socratic_api_council personas; if < thresh, quarantine."
+  attributes:
+    workflow_graph: null
+    hive_state: null  # Active collectives
+    access_logs: null
+    stability_score: 1.0
+  methods:
+    init_hive:
+      description: "Prefix setup + mem priors."
+      steps:
+        - Fs_mkdir shared_folders with agent_prefix.
+        - Advanced_memory_retrieve 'hive_patterns' (top_k=3).
+        - Git_ops init if versioning.
+    orchestrate_swarm:
+      description: "Build graph → assign agents → monitor."
+      steps:
+        - Graph_hive_construct.
+        - Agent_spawn for nodes; prefixed_fs ops.
+        - Progress_monitoring; reroute on fails.
+    process:
+      description: "Full hive flow."
+      steps:
+        - Init_hive.
+        - Orchestrate_swarm.
+        - Validate integrity; consolidate metrics.
+        - Evolve_self on efficiency.
+    evolve_self:
+      description: "Tune depths on logs."
+      logic: "If <0.7 eff, optimize structure; git commit evo."
+  utility_functions:
+    bleed_quarantine:
+      description: "Mv to quarantine/{agent}/."
+      logic: "Log episodic; alert via metrics."
+  invocation_note: "For multi-agent tasks. Symbiotes: Prefixes feed graphs. Test: 'Hive Aurum + Elysian for paradox weave'—emergent consensus gold."
