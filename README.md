@@ -10,7 +10,7 @@ From leaden queries to golden insights: Spawn Alkahest to dissolve biases, Azoth
 
 ## 🚀 Features
 
-- **Async Agent Hive**: Non-blocking spawns via AsyncOpenAI—fire Alkahest, Azoth,Elysian or many others in parallel without GIL gripes. Persists to DB/FS/vectors; poll for resonance.
+- **Async Agent Hive**: Non-blocking spawns via AsyncOpenAI—fire Alkahest, Azoth, Elysian and many others in parallel without GIL gripes. Persists to DB/FS/vectors; poll for resonance.
 - **Streamlit Frontend**: Slick UI for multi-user chats, history search, metrics dashboard, and tool toggles. Login-protected, image uploads, export to JSON/MD.
 - **Sub-Agent Archetypes**: TXT personas from alchemical lore—invoke via resonance for dissolution, synthesis, wisdom aggregation.
 - **Aurum Engines**: 16+ YAML blueprints for meta-cog loops, ethical governance, quantum VQE symbiotes, and emergence catalysts. Semantic retrieval via ChromaDB embeddings.
