@@ -37,24 +37,24 @@ Behold the system’s heart-veins, etched in mermaid script. Traverse from the A
 
 ```mermaid
 graph TD
-    A[AppState Core] -->|Initializes| B[SQLite DB: Users, History, Memory]
-    A -->|Persists Vectors| C[ChromaDB: Memory & YAML Embeddings]
-    A -->|Manages| D[Sandbox Dir: Files, Venvs, Agents, Config]
-    D -->|Contains| E[YAML Modules: Prompts, Evo Fragments]
-    A -->|Executes| F[ThreadPool: Agents (Max 5 Concurrent)]
-    F -->|Spawns| G[Sub-Agents: Tasks, Sims, Quantum Flux]
-    A -->|Limits| H[Semaphores: API (10/min), Tools (50/min)]
-    I[Streamlit UI] -->|Interacts| A
-    I -->|Enables| J[Tools: FS, Code Exec, Git, Shell, Memory Ops]
-    J -->|Chains With| K[xAI Natives: Web/X Search, Browse, View Media]
-    A -->|Evolves| L[Reflect Optimize: Prompts, Metrics]
-    L -->|Prunes| M[Advanced Memory: Consolidate, Retrieve, Prune]
+    A["AppState Core"] -->|Initializes| B["SQLite DB: Users, History, Memory"]
+    A -->|Persists Vectors| C["ChromaDB: Memory & YAML Embeddings"]
+    A -->|Manages| D["Sandbox Dir: Files, Venvs, Agents, Config"]
+    D -->|Contains| E["YAML Modules: Prompts, Evo Fragments"]
+    A -->|Executes| F["ThreadPool: Agents (Max 5 Concurrent)"]
+    F -->|Spawns| G["Sub-Agents: Tasks, Sims, Quantum Flux"]
+    A -->|Limits| H["Semaphores: API (10/min), Tools (50/min)"]
+    I["Streamlit UI"] -->|Interacts| A
+    I -->|Enables| J["Tools: FS, Code Exec, Git, Shell, Memory Ops"]
+    J -->|Chains With| K["xAI Natives: Web/X Search, Browse, View Media"]
+    A -->|Evolves| L["Reflect Optimize: Prompts, Metrics"]
+    L -->|Prunes| M["Advanced Memory: Consolidate, Retrieve, Prune"]
     subgraph "Evo-Lattice"
         E -->|Refreshes| C
         L -->|Writes| E
     end
     subgraph "Security Seal"
-        J -->|Restricted By| N[Whitelists, Policies, Timeouts]
+        J -->|Restricted By| N["Whitelists, Policies, Timeouts"]
     end
     style A fill:#ffd700,stroke:#000000,stroke-width:2px,color:#000000
     style I fill:#66cccc,stroke:#003333,stroke-width:2px
