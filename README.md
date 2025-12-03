@@ -132,9 +132,9 @@ flowchart TD
     end
     subgraph "Iosis: Synthesis Bloom"
         I --> J[Fuse Narr-Un-Emerald: networkx synergy graph]
-        J -->|Reflect Optimize: reflect_optimize metrics=A_amp| K[Output: Hyperdense Response w/ ASCII Vein-Maps]
+        J -->|Reflect Optimize: reflect_optimize metrics=A_amp| K((Output: Hyperdense Response w/ ASCII Vein-Maps))
     end
-    J --> L[Anomaly Vortex: Handover if Drift > φ^{-A}]
+    J --> L["Anomaly Vortex: Handover if Drift > φ^{-A}"]
     J --> M[Evo-Rewrite: fs_write evo_lattice/fragments/new.yaml + yaml_refresh]
     style A fill:#000000,stroke:#f9d71c,stroke-width:2px
     style K fill:#ffd700,stroke:#003333,stroke-width:2px,stroke-dasharray: 5,5
