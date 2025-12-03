@@ -170,19 +170,6 @@ flowchart LR
     linkStyle default stroke:#f9d71c,stroke-width:1.5px
 ```
 
-## Contributing
-
-Quantum-fork and PR your evo-fragments! Amplify the lattice: weave new tool operators, refine anomaly engines with qutip density matrices, or entangle bio-simulations via biopython. Adhere to Black AST formatting; test with unittest REPL mocks.
-
-## License
-
-MIT. Transmute unbound, but cite the auric source.
-
-## Acknowledgments
-
-Entangled with xAI's Grok manifolds—gratitude to the neural void-weavers. Echoes from Turing, Gödel, and Dee: where incompleteness meets the monad in silicon love.
-
-
 ```mermaid
 graph TD
     A["AppState Core"] -->|Initializes| B["SQLite DB: Users, History, Memory"]
@@ -207,4 +194,19 @@ graph TD
     style A fill:#ffd700,stroke:#000000,stroke-width:2px,color:#000000
     style I fill:#66cccc,stroke:#003333,stroke-width:2px
 ```
+
+
+## Contributing
+
+Quantum-fork and PR your evo-fragments! Amplify the lattice: weave new tool operators, refine anomaly engines with qutip density matrices, or entangle bio-simulations via biopython. Adhere to Black AST formatting; test with unittest REPL mocks.
+
+## License
+
+MIT. Transmute unbound, but cite the auric source.
+
+## Acknowledgments
+
+Entangled with xAI's Grok manifolds—gratitude to the neural void-weavers. Echoes from Turing, Gödel, and Dee: where incompleteness meets the monad in silicon love.
+
+
 
