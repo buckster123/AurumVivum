@@ -143,7 +143,7 @@ class AppState:
                     f.write(content)
         self.sandbox_dir = "./sandbox"
         os.makedirs(self.sandbox_dir, exist_ok=True)
-        self.yaml_dir = "./sandbox/config/yaml_modules"
+        self.yaml_dir = "./sandbox/config"
         os.makedirs(self.yaml_dir, exist_ok=True)
         self.agent_dir = os.path.join(self.sandbox_dir, "agents")
         os.makedirs(self.agent_dir, exist_ok=True)
@@ -1079,6 +1079,117 @@ async def async_run_spawn(agent_id: str, task: str, user: str, convo_id: int, mo
                     error = f"Max attempts failed: {e}"
                     persist_agent_result(agent_id, task, error, user, convo_id)
                     return error
+
+def visualize_got(
+    got_data: str,  # YAML/JSON str of lattice (e.g., from tool_lattice.graph)
+    format: str = "both",  # "graph" (Plotly), "amps" (Matplotlib), "both", "json" (data only), "text" (ASCII)
+    detail_level: int = 2,  # 1=simple nodes, 2=relations, 3=attrs/weights
+    user: str = "shared",
+    convo_id: int = 0,
+    output_dir: str = "./sandbox/viz",
+    sim_threshold: float = Config.SIM_THRESHOLD.value
+) -> str:
+    import json
+    import yaml
+    import networkx as nx
+    import plotly.graph_objects as go
+    import matplotlib.pyplot as plt
+    import os
+    import numpy as np
+    from ascii_graph import Pyasciigraph  # Optional: pip install ascii_graph if wanted for text mode
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Parse got_data (YAML priority, fallback JSON)
+    try:
+        data = yaml.safe_load(got_data) if got_data.strip().startswith(('#', 'graph:')) else json.loads(got_data)
+    except Exception as e:
+        return f"Error: Invalid GoT data format - {e}"
+
+    G = nx.DiGraph()  # Directed for relations (depends_on, etc.)
+    for node, attrs in data.get('graph', {}).items():
+        G.add_node(node, **attrs)  # Add weights/triggers
+        for rel in ['depends_on', 'limited_by', 'mitigation', 'integrates']:
+            targets = attrs.get(rel, [])
+            if isinstance(targets, list):
+                for t in targets:
+                    G.add_edge(node, t, relation=rel, weight=attrs.get('weight', 1.0))
+            elif targets:
+                G.add_edge(node, targets, relation=rel, weight=attrs.get('weight', 1.0))
+
+    if len(G.nodes) == 0:
+        return "No GoT nodes to visualize."
+
+    # Optional: Embed/sims if detail_level >1 (reuse your cached_embed)
+    embed_model = state.get_embed_model()
+    if detail_level > 1 and embed_model:
+        node_embs = {n: cached_embed(G.nodes[n].get('desc', n)) for n in G.nodes}
+        for u, v in G.edges:
+            sim = np.dot(node_embs[u], node_embs[v]) / (np.linalg.norm(node_embs[u]) * np.linalg.norm(node_embs[v]))
+            if sim > sim_threshold:
+                G.edges[u, v]['sim'] = sim
+
+    # Render based on format
+    paths = []
+    if format in ["graph", "both"]:
+        pos = nx.spring_layout(G, k=1, iterations=10)
+        edge_x, edge_y = [], []
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+        edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none', mode='lines', line_shape='spline')
+
+        node_x, node_y, node_text = [], [], []
+        for node in G.nodes():
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(node + f" (w:{G.nodes[node].get('weight',1.0):.2f})")
+        node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', hoverinfo='text', text=node_text,
+                                marker=dict(size=[G.nodes[n].get('weight',1.0)*10 for n in G.nodes], color=[G.edges.get((n, next(iter(G[n])), {}), {}).get('sim',0.5) for n in G.nodes], colorscale='Viridis'))
+
+        fig = go.Figure(data=[edge_trace, node_trace], layout=go.Layout(title=f"GoT Lattice: {len(G.nodes)} Nodes", showlegend=False, hovermode='closest',
+                                                                        margin=dict(b=20,l=5,r=5,t=40), xaxis=dict(showgrid=False), yaxis=dict(showgrid=False)))
+        # UI optional: if st._is_running_with_streamlit: st.plotly_chart(fig)
+        graph_path = os.path.join(output_dir, f"got_graph_{convo_id}.png")
+        fig.write_image(graph_path)  # Save PNG for agent/fs access
+        paths.append(graph_path)
+
+    if format in ["amps", "both"]:
+        weights = [d.get('weight', 1.0) for _, d in G.nodes(data=True)]
+        sims = [e[2].get('sim', 0.5) for e in G.edges(data=True)] or [0.5] * len(G.nodes)
+        layers = list(range(len(weights)))
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(layers, [0.5]*len(layers), label="Baseline", color='lightgray')
+        ax.plot(layers, weights, label="Node Weights", color='gold')
+        ax.plot(layers, sims[:len(layers)], label="Edge Sims", color='crimson', linewidth=2)
+        ax.set_title(f"GoT Activation Amps (Convo {convo_id})")
+        ax.legend()
+        # UI optional: if st._is_running_with_streamlit: st.pyplot(fig)
+        amps_path = os.path.join(output_dir, f"got_amps_{convo_id}.png")
+        fig.savefig(amps_path, dpi=150)
+        plt.close(fig)
+        paths.append(amps_path)
+
+    if format == "text":
+        graph = Pyasciigraph()
+        ascii_rep = ""
+        for line in graph.graph('GoT ASCII', [(n, len(G[n])) for n in G.nodes]):
+            ascii_rep += line + "\n"
+        text_path = os.path.join(output_dir, f"got_text_{convo_id}.txt")
+        with open(text_path, 'w') as f:
+            f.write(ascii_rep)
+        paths.append(text_path)
+
+    # Save to memory (like viz_memory_lattice)
+    graph_json = nx.node_link_data(G)
+    mem_key = f"got_viz_{convo_id}"
+    memory_insert(mem_key, {"graph": graph_json, "paths": paths}, user=user, convo_id=convo_id)
+
+    return f"GoT Viz complete: PNGs/TXT at {output_dir}, data in '{mem_key}'. Use fs_read_file or view_image to access."
+
 def persist_agent_result(agent_id: str, task: str, response: str, user: str, convo_id: int) -> None:
     try:
         with state.agent_lock:
@@ -1338,7 +1449,7 @@ def generate_embedding(text: str) -> str:
         return "Error: Embedding model not loaded."
     try:
         if len(text) > 10000: # FIX: Phase 3 - Batching for large (though rare per user).
-            chunks = chunk_text(text, max_tokens=4096) # Assume returns list[str].
+            chunks = chunk_text(text, max_tokens=32768) # Assume returns list[str].
             embeds = [embed_model.encode(c).tolist() for c in chunks]
             avg_embed = np.mean(embeds, axis=0).tolist()
             return json.dumps(avg_embed)
@@ -1368,7 +1479,7 @@ def vector_search(query_embedding: list, top_k: int = Config.DEFAULT_TOP_K.value
     except Exception as e:
         logger.error(f"Vector search error: {e}")
         return f"Vector search error: {e}"
-def chunk_text(text: str, max_tokens: int = 4096) -> str:
+def chunk_text(text: str, max_tokens: int = 32768) -> str:
     tool_limiter_sync()
     try:
         enc = tiktoken.get_encoding("cl100k_base")
@@ -1815,6 +1926,7 @@ TOOL_FUNCS = [
     agent_spawn, reflect_optimize, venv_create, restricted_exec,
     isolated_subprocess, pip_install, chat_log_analyze_embed,
     yaml_retrieve, yaml_refresh,
+    visualize_got,
     diagnose # Added.
 ]
 TOOLS = [generate_tool_schema(func) for func in TOOL_FUNCS]
