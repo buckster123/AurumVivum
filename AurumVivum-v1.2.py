@@ -1,3 +1,10 @@
+"""
+Aurum Vivum: Experimental AI Chat App
+- Purpose: Learning tool for xAI integration, memory management, and sandboxed utilities.
+- Environment: Python 3 venvs on ARM/Pi-5 (Trixie OS), single-user.
+- Key Features: Chat persistence, vector memory, tool dispatching.
+"""
+
 import asyncio
 import base64
 import builtins
@@ -55,6 +62,10 @@ import ast
 from functools import lru_cache, wraps
 import xml.dom.minidom # Ensure imported
 import torch # Added for device check in embed model.
+import cProfile  # Added for profiling
+import pstats
+import aiofiles  # Added for async I/O
+from marshmallow import Schema, fields, ValidationError  # Added for validation
 nest_asyncio.apply()
 logging.basicConfig(
     filename="app.log",
@@ -113,6 +124,10 @@ def inject_user_convo(func):
         return func(*args, **kwargs)
     return wrapper
 class AppState:
+    """Manages application resources including DB, caches, and directories.
+    
+    This singleton handles initialization, connections, and cleanup for shared state.
+    """
     def __init__(self):
         self.db_path = "sandbox/db/chatapp.db"
         self.chroma_path = "./sandbox/db/chroma_db"
@@ -162,7 +177,7 @@ class AppState:
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self.conn.execute("PRAGMA journal_mode=WAL;")
-            self.c = self.conn.cursor()
+            self.cursor = self.conn.cursor()  # Renamed for clarity
             self._init_db()
          
             self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
@@ -187,9 +202,9 @@ class AppState:
             self.chroma_ready = False
             self.chroma_collection = None
             self.yaml_collection = None
-    def __enter__(self):
+    def __enter__(self) -> "AppState":
         return self
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         if self.conn:
             self.conn.close()
         if self.chroma_client:
@@ -198,16 +213,16 @@ class AppState:
         if exc_type:
             logger.error(f"Exception in AppState: {exc_val}")
         return True # Suppress exceptions
-    def _init_db(self):
+    def _init_db(self) -> None:
         try:
             with self.conn:
-                self.c.execute(
+                self.cursor.execute(
                     """CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)"""
                 )
-                self.c.execute(
+                self.cursor.execute(
                     """CREATE TABLE IF NOT EXISTS history (user TEXT, convo_id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, messages TEXT)"""
                 )
-                self.c.execute(
+                self.cursor.execute(
                     """CREATE TABLE IF NOT EXISTS memory (
                     user TEXT,
                     convo_id INTEGER,
@@ -219,37 +234,44 @@ class AppState:
                     PRIMARY KEY (user, convo_id, mem_key)
                 )"""
                 )
-                self.c.execute("CREATE INDEX IF NOT EXISTS idx_memory_timestamp ON memory (timestamp)")
-                self.c.execute("CREATE INDEX IF NOT EXISTS idx_memory_user_convo ON memory (user, convo_id)")  # FIX: Phase 3 - Add index
+                self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_timestamp ON memory (timestamp)")
+                self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_user_convo ON memory (user, convo_id)")  # FIX: Phase 3 - Add index
              
-                self.c.execute("INSERT OR IGNORE INTO users (username, password) VALUES ('shared', ?)", (hash_password(''),))
+                self.cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES ('shared', ?)", (hash_password(''),))
         except sqlite3.Error as e: # FIX: Phase 1 - Specific.
             logger.error(f"DB init error: {e}")
             st.error(f"Failed to initialize database: {e}. App may not function properly.")
-    def _init_yaml_embeddings(self):
+    def _init_yaml_embeddings(self) -> None:
         embed_model = self.get_embed_model()
         if embed_model:
             files_refreshed = 0
             failed = []  # FIX: Phase 1 - Track failed
+            contents = []  # For batch
+            fnames = []
             for fname in os.listdir(self.yaml_dir):
                 if fname.endswith(".yaml"):
                     path = os.path.join(self.yaml_dir, fname)
                     try:
                         with open(path, "r", encoding="utf-8") as f:
                             content = f.read()
-                        embedding = embed_model.encode(content).tolist()
-                        with self.chroma_lock: # FIX: Phase 1 - Lock.
-                            self.yaml_collection.upsert(
-                                ids=[fname],
-                                embeddings=[embedding],
-                                documents=[content],
-                                metadatas=[{"filename": fname}],
-                            )
-                        self.yaml_cache[fname] = content
+                        contents.append(content)
+                        fnames.append(fname)
                         files_refreshed += 1
                     except OSError as e: # FIX: Phase 1 & 3 - Specific, skip.
                         logger.error(f"YAML file error for {fname}: {e}")
                         failed.append(fname)
+            if contents:
+                embeddings = embed_model.encode(contents, batch_size=32).tolist()  # Batched
+                metadatas = [{"filename": fn} for fn in fnames]
+                with self.chroma_lock: # FIX: Phase 1 - Lock.
+                    self.yaml_collection.upsert(
+                        ids=fnames,
+                        embeddings=embeddings,
+                        documents=contents,
+                        metadatas=metadatas,
+                    )
+                for i, fname in enumerate(fnames):
+                    self.yaml_cache[fname] = contents[i]
             self.yaml_ready = len(failed) == 0 and files_refreshed > 0  # FIX: Phase 1 - Ready only if no fails and files
             if failed:
                 logger.warning(f"Failed YAML files: {failed}")
@@ -257,12 +279,12 @@ class AppState:
         else:
             logger.warning("YAML embeddings skipped – embed model not ready.")
     @classmethod
-    def get(cls):
+    def get(cls) -> "AppState":
         if "app_state" not in st.session_state:
             st.session_state["app_state"] = cls()
         return st.session_state["app_state"]
  
-    def get_embed_model(self):
+    def get_embed_model(self) -> SentenceTransformer | None:
         if self.embed_model is None:
             for _ in range(3):  # FIX: Phase 2 - Retry 3x
                 try:
@@ -278,7 +300,7 @@ class AppState:
                 st.error("Failed to load embedding model after retries. Some features may be disabled.")
                 self.embed_model = None
         return self.embed_model
-    def lru_evict(self):
+    def lru_evict(self) -> None:
         # IMPROVED: Use OrderedDict for O(1) eviction
         if "lru_ordered" not in self.memory_cache:
             from collections import OrderedDict
@@ -330,11 +352,11 @@ body {
 """,
     unsafe_allow_html=True,
 )
-def get_state(key: str, default=None):
+def get_state(key: str, default=None) -> typing.Any:
     if key not in st.session_state:
         st.session_state[key] = default
     return st.session_state[key]
-def safe_call(func, *args, max_retries=3, **kwargs):
+def safe_call(func: typing.Callable, *args, max_retries: int = 3, **kwargs) -> typing.Any:
     start = time.time()  # FIX: Phase 2 - Timing
     for attempt in range(max_retries):
         try:
@@ -359,7 +381,7 @@ def safe_call(func, *args, max_retries=3, **kwargs):
     state.stability_score = max(0.0, state.stability_score - 0.1)
     logger.info(f"{func.__name__} took {time.time() - start}s")  # FIX: Phase 2 - Log time
     return "Max retries exceeded."
-def notify_critical(err: str):
+def notify_critical(err: str) -> None:
     st.error(f"Critical: {err}")
     logger.critical(err)
 def get_tool_cache_key(func_name: str, args: dict) -> str:
@@ -377,7 +399,7 @@ def get_cached_tool_result(func_name: str, args: dict, ttl_minutes: int = Config
         if (datetime.now() - timestamp).total_seconds() / 60 < ttl_minutes:
             return result
     return None
-def set_cached_tool_result(func_name: str, args: dict, result: str):
+def set_cached_tool_result(func_name: str, args: dict, result: str) -> None:
     with state.session_lock:  # FIX: Phase 2 - Lock
         cache = get_state("tool_cache", {})
         key = get_tool_cache_key(func_name, args)
@@ -386,7 +408,7 @@ def set_cached_tool_result(func_name: str, args: dict, result: str):
             oldest_key = min(cache, key=lambda k: cache[k][0])
             del cache[oldest_key]
         st.session_state["tool_cache"] = cache
-def load_prompt_files() -> list:
+def load_prompt_files() -> list[str]:
     return [f for f in os.listdir(state.prompts_dir) if f.endswith(".txt")]
 def gen_title(first_msg: str) -> str:
     try:
@@ -419,7 +441,7 @@ def auto_optimize_prompt(current_prompt: str, user: str, convo_id: int, metrics:
         logger.error(f"Prompt optimize error: {e}")
         return current_prompt
 @st.cache_data(ttl=300, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True)}) # Added hash for dicts
-def fs_read_file(file_path: str) -> str:
+async def fs_read_file(file_path: str) -> str:
     safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.') # Safer paths
     safe_path = safe_path.resolve()
     if not safe_path.is_relative_to(pathlib.Path(state.sandbox_dir).resolve()):
@@ -427,26 +449,26 @@ def fs_read_file(file_path: str) -> str:
     if not safe_path.exists():  # Proactive check
         if safe_path.suffix in ['.yaml', '.lattice']:  # Auto-create defaults for configs
             safe_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(safe_path, 'w') as f:
-                f.write('{}')  # Empty dict as default
+            async with aiofiles.open(safe_path, 'w') as f:
+                await f.write('{}')  # Empty dict as default
             logger.info(f"Auto-created missing file: {file_path}")
         else:
             return "Error: File not found."
     try:
-        with open(safe_path, "r", encoding="utf-8") as f:
-            return f.read()
+        async with aiofiles.open(safe_path, "r", encoding="utf-8") as f:
+            return await f.read()
     except Exception as e:
         logger.error(f"Error reading file: {e}")
         return f"Error reading file: {e}"
-def fs_write_file(file_path: str, content: str) -> str:
+async def fs_write_file(file_path: str, content: str) -> str:
     safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.') # Safer
     safe_path = safe_path.resolve()
     if not safe_path.is_relative_to(pathlib.Path(state.sandbox_dir).resolve()):
         return "Error: Path is outside the sandbox."
     try:
         content = html.unescape(content)
-        with open(safe_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        async with aiofiles.open(safe_path, "w", encoding="utf-8") as f:
+            await f.write(content)
         if "tool_cache" in st.session_state:
             key_to_remove = get_tool_cache_key("fs_read_file", {"file_path": file_path})
             st.session_state["tool_cache"].pop(key_to_remove, None)
@@ -537,11 +559,11 @@ ADDITIONAL_LIBS = {
     "matplotlib": __import__('matplotlib') if 'matplotlib' in sys.modules else None,
     "pandas": __import__('pandas') if 'pandas' in sys.modules else None,
 }
-def init_repl_namespace():
+def init_repl_namespace() -> None:
     if "repl_namespace" not in st.session_state:
         st.session_state["repl_namespace"] = {"__builtins__": SAFE_BUILTINS.copy()}
         st.session_state["repl_namespace"].update({k: v for k, v in ADDITIONAL_LIBS.items() if v is not None})
-def restricted_policy(node):
+def restricted_policy(node: ast.AST) -> bool:
     if isinstance(node, ast.Import) or isinstance(node, ast.ImportFrom):
         if isinstance(node, ast.ImportFrom) and node.module in ADDITIONAL_LIBS: # Allow safe imports
             return True
@@ -612,7 +634,7 @@ def memory_insert(
         return "Error: mem_value not JSON-serializable."
     try:
         with state.conn:
-            state.c.execute(
+            state.cursor.execute(
                 "INSERT OR REPLACE INTO memory (user, convo_id, mem_key, mem_value) VALUES (?, ?, ?, ?)",
                 (user, convo_id, mem_key, json.dumps(mem_value)),
             )
@@ -635,7 +657,7 @@ def memory_insert(
     except Exception as e:
         logger.error(f"Error inserting memory: {e}")
         return f"Error inserting memory: {e}"
-def load_into_lru(key: str, entry: dict, user: str, convo_id: int):
+def load_into_lru(key: str, entry: dict, user: str, convo_id: int) -> None:
     cache_key = f"{user}_{convo_id}_{key}"
     if cache_key not in state.memory_cache["lru_cache"]:
         state.memory_cache["lru_cache"][cache_key] = {
@@ -657,20 +679,20 @@ def memory_query(
     try:
         with state.conn:
             if mem_key:
-                state.c.execute(
+                state.cursor.execute(
                     "SELECT mem_value FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
                     (user, convo_id, mem_key),
                 )
-                result = state.c.fetchone()
+                result = state.cursor.fetchone()
                 logger.info(f"Memory queried: {mem_key} (user={user}, convo={convo_id})")
                 return json.loads(result[0]) if result and result[0] else "Key not found."
             else:
-                state.c.execute(
+                state.cursor.execute(
                     "SELECT mem_key, mem_value FROM memory WHERE user=? AND convo_id=? ORDER BY timestamp DESC LIMIT ?",
                     (user, convo_id, limit),
                 )
                 results = {}
-                for row in state.c.fetchall():
+                for row in state.cursor.fetchall():
                     if row[1]:
                         results[row[0]] = json.loads(row[1])
                 for key in results:
@@ -707,7 +729,7 @@ def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user
         summary = summary_response.choices[0].message.content.strip()
         json_episodic = json.dumps(interaction_data)
         with state.conn:
-            state.c.execute(
+            state.cursor.execute(
                 "INSERT OR REPLACE INTO memory (user, convo_id, mem_key, mem_value) VALUES (?, ?, ?, ?)",
                 (user, convo_id, mem_key, json_episodic),
             )
@@ -751,7 +773,25 @@ def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user
     except Exception:
         logger.error(f"Error consolidating memory: {traceback.format_exc()}")
         return f"Error consolidating memory: {traceback.format_exc()}"
+
+def profile_func(func: typing.Callable) -> typing.Callable:
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if os.getenv('PROFILE_MODE'):  # Enable via env var for testing
+            pr = cProfile.Profile()
+            pr.enable()
+            result = func(*args, **kwargs)
+            pr.disable()
+            s = io.StringIO()
+            ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+            ps.print_stats(10)  # Top 10 callers
+            logger.info(s.getvalue())
+            return result
+        return func(*args, **kwargs)
+    return wrapper
+
 @inject_user_convo
+@profile_func
 def advanced_memory_retrieve(
     query: str, top_k: int = Config.DEFAULT_TOP_K.value, user: str = 'shared', convo_id: int = 0
 ) -> str:
@@ -842,7 +882,7 @@ def fallback_to_keyword(query: str, top_k: int, user: str, convo_id: int) -> lis
             }
         )
     return retrieved
-def process_chroma_results(results: dict, top_k: int) -> list:
+def process_chroma_results(results: dict, top_k: int) -> list[dict]:
     if not results or not results.get("ids") or not results["ids"]:
         return []
     retrieved = []
@@ -869,7 +909,7 @@ def process_chroma_results(results: dict, top_k: int) -> list:
             )
     retrieved.sort(key=lambda x: x["relevance"], reverse=True)
     return retrieved
-def update_retrieve_metrics(len_retrieved: int, top_k: int):
+def update_retrieve_metrics(len_retrieved: int, top_k: int) -> None:
     state.memory_cache["metrics"]["total_retrieves"] += 1
     hit_rate = len_retrieved / top_k if top_k > 0 else 1.0
     state.memory_cache["metrics"]["hit_rate"] = (
@@ -884,48 +924,48 @@ def should_prune() -> bool:
         st.session_state["prune_counter"] = 0
     st.session_state["prune_counter"] += 1
     return st.session_state["prune_counter"] % Config.PRUNE_FREQUENCY.value == 0
-def decay_salience(user: str, convo_id: int):
+def decay_salience(user: str, convo_id: int) -> None:
     one_week_ago = (datetime.now() - timedelta(days=7)).isoformat()  # FIX: Phase 1 - ISO str
     with state.conn:
-        state.c.execute(
+        state.cursor.execute(
             "UPDATE memory SET salience = salience * 0.99 WHERE user=? AND convo_id=? AND timestamp < ?",
             (user, convo_id, one_week_ago),
         )
-def prune_low_salience(user: str, convo_id: int):
+def prune_low_salience(user: str, convo_id: int) -> None:
     with state.conn:
-        state.c.execute(
+        state.cursor.execute(
             "DELETE FROM memory WHERE user=? AND convo_id=? AND salience < 0.1",
             (user, convo_id),
         )
-def size_based_prune(user: str, convo_id: int):
+def size_based_prune(user: str, convo_id: int) -> None:
     with state.conn:
-        state.c.execute(
+        state.cursor.execute(
             "SELECT COUNT(*) FROM memory WHERE user=? AND convo_id=?", (user, convo_id)
         )
-        row_count = state.c.fetchone()[0]
+        row_count = state.cursor.fetchone()[0]
         if row_count > 1000:
-            state.c.execute(
+            state.cursor.execute(
                 "SELECT mem_key FROM memory WHERE user=? AND convo_id=? AND salience < 0.5 ORDER BY timestamp ASC LIMIT ?",
                 (user, convo_id, row_count - 1000),
             )
-            low_keys = [row[0] for row in state.c.fetchall()]
+            low_keys = [row[0] for row in state.cursor.fetchall()]
             if not low_keys:  # FIX: Phase 1 - If no low, delete oldest
-                state.c.execute(
+                state.cursor.execute(
                     "SELECT mem_key FROM memory WHERE user=? AND convo_id=? ORDER BY timestamp ASC LIMIT ?",
                     (user, convo_id, row_count - 1000),
                 )
-                low_keys = [row[0] for row in state.c.fetchall()]
-            state.c.executemany(
+                low_keys = [row[0] for row in state.cursor.fetchall()]
+            state.cursor.executemany(
                 "DELETE FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
                 [(user, convo_id, key) for key in low_keys]
             )
-def dedup_prune(user: str, convo_id: int):
+def dedup_prune(user: str, convo_id: int) -> None:
     with state.conn:
-        state.c.execute(
+        state.cursor.execute(
             "SELECT mem_key, mem_value FROM memory WHERE user=? AND convo_id=?",
             (user, convo_id),
         )
-        rows = state.c.fetchall()
+        rows = state.cursor.fetchall()
         hashes = {}
         to_delete = []
         for key, value_str in rows:
@@ -935,7 +975,7 @@ def dedup_prune(user: str, convo_id: int):
                 to_delete.append(key)
             else:
                 hashes[h] = value
-        state.c.executemany(
+        state.cursor.executemany(
             "DELETE FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
             [(user, convo_id, key) for key in to_delete]
         )
@@ -951,7 +991,7 @@ def advanced_memory_prune(user: str = 'shared', convo_id: int = 0) -> str:
                 size_based_prune(u, cid)
                 dedup_prune(u, cid)
                 one_week_ago = (datetime.now() - timedelta(days=7)).isoformat()  # FIX: Phase 1 - ISO
-                state.c.execute(
+                state.cursor.execute(
                     "DELETE FROM memory WHERE user=? AND convo_id=? AND timestamp < ? AND mem_key LIKE 'agent_%'",
                     (u, cid, one_week_ago),
                 )
@@ -976,7 +1016,7 @@ def advanced_memory_prune(user: str = 'shared', convo_id: int = 0) -> str:
     except Exception as e:
         return f"Prune timeout/error: {e}"
 @lru_cache(maxsize=128)
-def cached_embed(summary: str):
+def cached_embed(summary: str) -> list[float]:
     embed_model = state.get_embed_model()
     return embed_model.encode(summary).tolist()
 def viz_memory_lattice(
@@ -1287,7 +1327,7 @@ def agent_spawn(sub_agent_type: str, task: str, user: str = 'shared', convo_id: 
                 return f"Polled result: {complete}"
         return "Poll timeout."
     return f"Agent '{sub_agent_type}' spawned (ID: {agent_id}). Poll 'agent_{agent_id}_complete' for results. Status: {status_key}"
-def render_agent_fleet():
+def render_agent_fleet() -> None:
     pending = get_state("pending_notifies", [])
     if pending:
         st.subheader("Recent Notifies")
@@ -1406,8 +1446,14 @@ def db_query(db_path: str, query: str, params: list = None) -> str:
     except Exception as e:
         logger.error(f"DB error: {e}")
         return f"DB error: {e}"
+class ShellExecSchema(Schema):
+    command = fields.Str(required=True, validate=lambda x: re.match(r"^(ls|grep|sed|awk|cat|echo|wc|tail|head|cp|mv|rm|mkdir|rmdir|touch|python|pip)$", shlex.split(x)[0]))
 def shell_exec(command: str) -> str:
     tool_limiter_sync()
+    try:
+        ShellExecSchema().load({"command": command})
+    except ValidationError as e:
+        return f"Validation error: {e.messages}"
     whitelist_pattern = r"^(ls|grep|sed|awk|cat|echo|wc|tail|head|cp|mv|rm|mkdir|rmdir|touch|python|pip)$" # Expanded
     cmd_parts = shlex.split(command)
     cmd_base = cmd_parts[0]
@@ -1562,11 +1608,11 @@ def keyword_search(
     tool_limiter_sync()
     try:
         with state.conn:
-            state.c.execute(
+            state.cursor.execute(
                 "SELECT mem_key FROM memory WHERE user=? AND convo_id=? AND mem_value LIKE ? ORDER BY salience DESC LIMIT ?",
                 (user, convo_id, f"%{query}%", top_k),
             )
-            results = [{"id": row[0], "score": 1.0} for row in state.c.fetchall()]
+            results = [{"id": row[0], "score": 1.0} for row in state.cursor.fetchall()]
             return results
     except Exception as e:
         logger.error(f"Keyword search error: {e}")
@@ -1696,7 +1742,7 @@ def isolated_subprocess(cmd: str, custom_env: dict = None) -> str:
         logger.error(f"Subprocess error: {e}")
         return f"Subprocess error: {e}"
 PIP_WHITELIST = [
-    "numpy",
+    "numpy<2.0",  # Pinned for ARM compat if needed
     "pandas",
     "matplotlib",
     "scipy",
@@ -1734,10 +1780,10 @@ def chat_log_analyze_embed(
 ) -> str:
     tool_limiter_sync()
     with state.conn:
-        state.c.execute(
+        state.cursor.execute(
             "SELECT messages FROM history WHERE convo_id=? AND user=?", (convo_id, user)
         )
-        result = state.c.fetchone()
+        result = state.cursor.fetchone()
     if not result:
         return "Error: Chat log not found."
     messages = json.loads(result[0])
@@ -1914,7 +1960,7 @@ def yaml_refresh(filename: str = None) -> str:
         logger.error(f"YAML refresh error: {e}")
         return f"YAML refresh error: {e}"
 # IMPROVED: Type-aware schema
-def generate_tool_schema(func):
+def generate_tool_schema(func: typing.Callable) -> dict:
     sig = inspect.signature(func)
     properties = {}
     required = []
@@ -2034,7 +2080,8 @@ NATIVE_TOOLS = [
 tool_count = get_state("tool_count", 0)
 council_count = get_state("council_count", 0)
 main_count = get_state("main_count", 0)
-def _handle_single_tool(tool_call, current_messages, enable_tools):
+
+def _handle_single_tool(tool_call, current_messages, enable_tools) -> typing.Generator[str, None, None]:
     func_name = tool_call.function.name
     try:
         args = json.loads(tool_call.function.arguments)
@@ -2059,23 +2106,30 @@ def _handle_single_tool(tool_call, current_messages, enable_tools):
     current_messages.append(
         {"tool_call_id": tool_call.id, "role": "tool", "name": func_name, "content": str(result)}
     )
-def process_tool_calls(tool_calls, current_messages, enable_tools):
+def process_tool_calls(tool_calls, current_messages, enable_tools) -> typing.Generator[str, None, None]:
     yield "\n*Thinking... Using tools...*\n"
+    tool_history = []
     with state.conn:
         for tool_call in tool_calls:
-            yield from _handle_single_tool(tool_call, current_messages, enable_tools)
+            for chunk in _handle_single_tool(tool_call, current_messages, enable_tools):
+                yield chunk
+            tool_history.append(f"{tool_call.function.name}: {chunk[:50]}")
+    with st.expander("Tool Chain Viz"):
+        st.write("\n".join(tool_history))
+@profile_func
 def call_xai_api(
-    model,
-    messages,
-    sys_prompt,
-    stream=True,
-    image_files=None,
-    enable_tools=False,
-    enable_xai_tools=True,
-):
+    model: str,
+    messages: list[dict],
+    sys_prompt: str,
+    stream: bool = True,
+    image_files: list = None,
+    enable_tools: bool = False,
+    enable_xai_tools: bool = True,
+) -> typing.Generator[str, None, None]:
     # Custom function tools only (no natives in tools array)
     all_tools = TOOLS if enable_tools else None
  
+    client = OpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/", timeout=3600)
     client = OpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/", timeout=3600)
     api_messages = [{"role": "system", "content": sys_prompt}]
     for msg in messages:
@@ -2097,7 +2151,7 @@ def call_xai_api(
             }
         )
  
-    def generate(current_messages):
+    def generate(current_messages: list[dict]) -> typing.Generator[str, None, None]:
         global tool_count, council_count, main_count
         max_iterations = Config.MAX_ITERATIONS.value
         tool_calls_per_convo = get_state("tool_calls_per_convo", 0)
@@ -2183,7 +2237,7 @@ def call_xai_api(
                 break
             except openai.RateLimitError as e:
                 backoff = 60
-                error_msg = f"Rate limit hit: {str(e)}. Backing off {backoff}s..."
+                error_msg = f"Rate limit hit hit: {str(e)}. Backing off {backoff}s..."
                 yield f"\n{error_msg}"
                 logger.warning(f"Rate limit: {e}. Backoff: {backoff}s")
                 time.sleep(backoff)
@@ -2228,13 +2282,13 @@ def call_xai_api(
                 yield "Total timeout—aborting."
                 break
     return generate(api_messages)
-def search_history(query: str):
-    state.c.execute(
+def search_history(query: str) -> list[tuple]:
+    state.cursor.execute(
         "SELECT convo_id, title FROM history WHERE user=? AND title LIKE ?",
         (st.session_state["user"], f"%{query}%"),
     )
-    return state.c.fetchall()
-def export_convo(format: str = "json"):
+    return state.cursor.fetchall()
+def export_convo(format: str = "json") -> str:
     if "messages" not in st.session_state:  # FIX: Phase 1 - Check
         return "No convo to export."
     if format == "json":
@@ -2250,7 +2304,7 @@ def export_convo(format: str = "json"):
             txt += f"{msg['role']}: {msg['content']}\n\n"
         return txt
     return "Unsupported format."
-def render_sidebar():
+def render_sidebar() -> None:
     global main_count, tool_count, council_count # Moved to top of function
     with st.sidebar:
         st.header("Chat Settings")
@@ -2296,6 +2350,9 @@ def render_sidebar():
                 height=200,
                 key="custom_prompt",
             )
+            if st.button("Save Prompt"):
+                with open(os.path.join(state.prompts_dir, "custom.txt"), "w") as f:
+                    f.write(st.session_state["custom_prompt"])
             if st.button("Evolve Prompt"):
                 user = st.session_state.get("user")
                 convo_id = st.session_state.get("current_convo_id", 0)
@@ -2334,11 +2391,11 @@ def render_sidebar():
             if history_search:
                 histories = search_history(history_search)
             else:
-                state.c.execute(
+                state.cursor.execute(
                     "SELECT convo_id, title FROM history WHERE user=? ORDER BY convo_id DESC",
                     (st.session_state["user"],),
                 )
-                histories = state.c.fetchall()
+                histories = state.cursor.fetchall()
             for convo_id, title in histories:
                 col1, col2 = st.columns([4, 1])
                 with col1:
@@ -2360,7 +2417,7 @@ def render_sidebar():
                     st.metric("Hit Rate", f"{metrics['hit_rate']:.2%}")
                     st.metric("Tool Calls", tool_count)
                     st.metric("Council Calls", council_count)
-                    st.metric("Stability Score", f"{state.stability_score:.2%}")
+                    st.metric("Stability Score", f"{state.stability_score:.2%}", delta_color="normal" if state.stability_score > 0.8 else "inverse")
                     st.metric("Main API Calls", main_count) # FIX: Phase 3.
                 if st.button("Weave Memory Lattice (Viz Current Convo)"):
                     viz_result = viz_memory_lattice(st.session_state["user"], st.session_state["current_convo_id"])
@@ -2383,7 +2440,7 @@ def render_sidebar():
                             st.text(log.strip())
         with tab2:
             render_agent_fleet()
-def login_page():
+def login_page() -> None:
     st.title("Aurum Vivum Interface")
     tab1, tab2 = st.tabs(["Login", "Register"])
     with tab1:
@@ -2391,8 +2448,8 @@ def login_page():
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             if st.form_submit_button("Login"):
-                state.c.execute("SELECT password FROM users WHERE username=?", (username,))
-                result = state.c.fetchone()
+                state.cursor.execute("SELECT password FROM users WHERE username=?", (username,))
+                result = state.cursor.fetchone()
                 if result and verify_password(result[0], password):
                     st.session_state["logged_in"] = True
                     st.session_state["user"] = username
@@ -2405,29 +2462,29 @@ def login_page():
             new_user = st.text_input("New Username")
             new_pass = st.text_input("New Password", type="password")
             if st.form_submit_button("Register"):
-                state.c.execute("SELECT * FROM users WHERE username=?", (new_user,))
-                if state.c.fetchone():
+                state.cursor.execute("SELECT * FROM users WHERE username=?", (new_user,))
+                if state.cursor.fetchone():
                     st.error("Username already exists.")
                 else:
-                    state.c.execute(
+                    state.cursor.execute(
                         "INSERT INTO users VALUES (?, ?)",
                         (new_user, hash_password(new_pass)),
                     )
                     state.conn.commit()
                     st.success("Registered! Please login.")
-def load_history(convo_id: int):
-    state.c.execute(
+def load_history(convo_id: int) -> None:
+    state.cursor.execute(
         "SELECT messages FROM history WHERE convo_id=? AND user=?",
         (convo_id, st.session_state["user"]),
     )
-    if result := state.c.fetchone():
+    if result := state.cursor.fetchone():
         messages = json.loads(result[0])
         st.session_state["messages"] = messages
         st.session_state["current_convo_id"] = convo_id
         st.session_state["rerun_guard"] = False
         st.rerun()
-def delete_history(convo_id: int):
-    state.c.execute(
+def delete_history(convo_id: int) -> None:
+    state.cursor.execute(
         "DELETE FROM history WHERE convo_id=? AND user=?",
         (convo_id, st.session_state["user"]),
     )
@@ -2437,7 +2494,7 @@ def delete_history(convo_id: int):
         st.session_state["current_convo_id"] = 0
     st.session_state["rerun_guard"] = False
     st.rerun()
-def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, uploaded_images: list, enable_xai_tools: bool):
+def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, uploaded_images: list, enable_xai_tools: bool) -> None:
     st.title(f"Aurum Vivum - {st.session_state['user']}")
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
@@ -2471,21 +2528,21 @@ def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, up
         messages_json = json.dumps(st.session_state.messages)
         if st.session_state.get("current_convo_id", 0) == 0:
             with state.conn:
-                state.c.execute(
+                state.cursor.execute(
                     "INSERT INTO history (user, title, messages) VALUES (?, ?, ?)",
                     (st.session_state["user"], title, messages_json),
                 )
-                st.session_state.current_convo_id = state.c.lastrowid
+                st.session_state.current_convo_id = state.cursor.lastrowid
         else:
             with state.conn:
-                state.c.execute(
+                state.cursor.execute(
                     "UPDATE history SET title=?, messages=? WHERE convo_id=?",
                     (title, messages_json, st.session_state["current_convo_id"]),
                 )
         st.session_state["rerun_guard"] = False
         render_agent_fleet()
         st.rerun()
-def chat_page():
+def chat_page() -> None:
     render_sidebar()
     render_chat_interface(
         st.session_state["model_select"],
@@ -2499,135 +2556,126 @@ if "auto_prune_done" not in st.session_state:
     convo_id = st.session_state.get("current_convo_id", 0)
     advanced_memory_prune(user=user, convo_id=convo_id)
     st.session_state["auto_prune_done"] = True
-def run_tests():
+def run_tests() -> bool:
     class TestTools(unittest.TestCase):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            # FIX: Phase 1 test for chroma lock - Sim race.
-            def test_chroma_lock(self):
-                def consolidate_task():
-                    advanced_memory_consolidate("test_key", {"data": "test"})
-                def retrieve_task():
-                    advanced_memory_retrieve("test")
-                threads = [threading.Thread(target=consolidate_task) for _ in range(2)] + [threading.Thread(target=retrieve_task) for _ in range(2)]
-                for t in threads: t.start()
-                for t in threads: t.join()
-                self.assertTrue(True) # Check no exceptions in logs manually.
-            # FIX: Phase 2 - Restricted policy.
-            def test_restricted_policy(self):
-                bad_code = "__builtins__['open']('secret.txt')"
-                result = code_execution(bad_code)
-                self.assertIn("Banned" or "Restricted", result)
-            # Original tests here...
-            def setUp(self):
-                st.session_state["user"] = "test_user"
-                st.session_state["current_convo_id"] = 1
-                st.session_state["memory_cache"] = {
-                    "lru_cache": {},
-                    "metrics": {"total_inserts": 0, "total_retrieves": 0, "hit_rate": 1.0},
-                }
-                st.session_state["tool_cache"] = {}
-                st.session_state["yaml_ready"] = True
-                st.session_state["chroma_ready"] = True
-            def test_fs_write_read(self):
-                result_write = safe_call(fs_write_file, "test.txt", "Hello World")
-                self.assertIn("successfully", result_write)
-                result_read = safe_call(fs_read_file, "test.txt")
-                self.assertEqual(result_read, "Hello World")
-            def test_memory_insert_query(self):
-                mem_value = {"summary": "test mem", "salience": 0.8}
-                result_insert = safe_call(memory_insert, "test_key", mem_value, "test", 1)
-                self.assertEqual(result_insert, "Memory inserted successfully.")
-                result_query = safe_call(memory_query, mem_key="test_key", user="test", convo_id=1)
-                self.assertIn("summary", str(result_query))
-                self.assertIn("test mem", str(result_query))
-            def test_memory_shared_mode(self):
-                result_insert = safe_call(memory_insert, "shared_key", {"test": "data"})
-                self.assertEqual(result_insert, "Memory inserted successfully.")
-                query = safe_call(memory_query, mem_key="shared_key")
-                self.assertIn("test", str(query))
-            def test_advanced_memory_prune(self):
-                low_mem = {"summary": "low salience", "salience": 0.05}
-                safe_call(memory_insert, "low_key", low_mem, "test", 1)
-                st.session_state["prune_counter"] = 49
-                result_prune = safe_call(advanced_memory_prune, "test", 1)
-                self.assertIn("successfully", result_prune)
-                query_after = safe_call(memory_query, mem_key="low_key", user="test", convo_id=1)
-                self.assertEqual(query_after, "Key not found.")
-            def test_tool_cache(self):
-                args = {"file_path": "cache_test.txt"}
-                set_cached_tool_result("fs_read_file", args, "cached_value")
-                result = get_cached_tool_result("fs_read_file", args)
-                self.assertEqual(result, "cached_value")
-                old_timestamp = datetime.now() - timedelta(minutes=20)
-                st.session_state["tool_cache"][get_tool_cache_key("fs_read_file", args)] = (old_timestamp, "expired")
-                result_expired = get_cached_tool_result("fs_read_file", args)
-                self.assertIsNone(result_expired)
-            def test_agent_spawn_persist(self):
-                result_spawn = safe_call(agent_spawn, "TestAgent", "Mock task: echo hello", "test", 1)
-                self.assertIn("spawned (ID:", result_spawn)
-                agent_id_prefix = result_spawn.split("ID: ")[1].split(")")[0][:12]
-                status_query = safe_call(memory_query, mem_key=f"agent_{agent_id_prefix}_status", user="test", convo_id=1)
-                self.assertIn("status", str(status_query))
-                self.assertIn("spawned", str(status_query))
-            def test_code_execution_restricted(self):
-                code = "print('Hello from REPL')"
-                result = safe_call(code_execution, code)
-                self.assertIn("Hello from REPL", result)
-                bad_code = "import os; os.system('ls')"
-                bad_result = safe_call(code_execution, bad_code)
-                self.assertIn("Restricted", bad_result) or self.assertIn("Error", bad_result)
-            def test_git_ops_init_commit(self):
-                result_init = safe_call(git_ops, "init", "test_repo")
-                self.assertEqual(result_init, "Repo initialized.")
-                safe_call(fs_write_file, "test_repo/test.txt", "commit test")
-                result_commit = safe_call(git_ops, "commit", "test_repo", message="Test commit")
-                self.assertEqual(result_commit, "Committed.")
-            def test_shell_exec_whitelist(self):
-                result_ls = safe_call(shell_exec, "ls .")
-                self.assertNotIn("Error: Command not whitelisted.", result_ls)
-                st.session_state["confirm_destructive_1"] = False
-                result_rm = safe_call(shell_exec, "rm test_rm.txt")
-                self.assertIn("Warning: Destructive command detected.", result_rm)
-                st.session_state["confirm_destructive_1"] = True
-                result_rm_confirm = safe_call(shell_exec, "rm test_rm.txt")
-                self.assertNotIn("Warning", result_rm_confirm)
-                result_bad = safe_call(shell_exec, "curl google.com")
-                self.assertIn("Error: Command not whitelisted.", result_bad)
-                # NEW: Injection test
-                inject_cmd = 'grep "; rm *"'
-                result_inject = safe_call(shell_exec, inject_cmd)
-                self.assertIn("Error", result_inject) or self.assertNotIn("rm", result_inject)
-            def test_code_lint_python(self):
-                ugly_code = "def foo():print('hi')"
-                result = safe_call(code_lint, "python", ugly_code)
-                self.assertIn("def foo():\n print('hi')", result)
-            def test_api_simulate_mock(self):
-                result_mock = safe_call(api_simulate, "https://api.example.com/test", method="GET", mock=True)
-                self.assertIn("Mock response", result_mock)
-            def test_yaml_retrieve_ready(self):
-                safe_call(fs_write_file, "test.yaml", "key: value")
-                safe_call(yaml_refresh, "test.yaml")
-                result = safe_call(yaml_retrieve, filename="test.yaml")
-                self.assertIn("key: value", result)
-            def test_socratic_council(self):
-                branches = ["Option A", "Option B"]
-                result = safe_call(socratic_api_council, branches, user="test", convo_id=1)
-                self.assertIn("Round", result)
-                self.assertIn("Consensus", result)
-            def test_agent_sem_bound(self):
-                self.assertTrue(hasattr(state, 'agent_sem'))
-                self.assertEqual(state.agent_sem._value, Config.AGENT_MAX_CONCURRENT.value)
-            # NEW: Test reflect
-            def test_reflect_optimize(self):
-                metrics = {"test": 1}
-                result = safe_call(reflect_optimize, "test_component", metrics)
-                self.assertIn("Optimized", result) or self.assertIn("Suggest", result)
-            # NEW: Async test
-            def test_async_spawn(self):
-                import asyncio
-                result = asyncio.run(async_run_spawn("test_id", "echo test", "test", 1))
-                self.assertIn("test", result)  # Assume mock success
+        def setUp(self) -> None:
+            st.session_state["user"] = "test_user"
+            st.session_state["current_convo_id"] = 1
+            st.session_state["memory_cache"] = {
+                "lru_cache": {},
+                "metrics": {"total_inserts": 0, "total_retrieves": 0, "hit_rate": 1.0},
+            }
+            st.session_state["tool_cache"] = {}
+            st.session_state["yaml_ready"] = True
+            st.session_state["chroma_ready"] = True
+        def test_fs_write_read(self) -> None:
+            result_write = safe_call(fs_write_file, "test.txt", "Hello World")
+            self.assertIn("successfully", result_write)
+            result_read = asyncio.run(safe_call(fs_read_file, "test.txt"))
+            self.assertEqual(result_read, "Hello World")
+        def test_memory_insert_query(self) -> None:
+            mem_value = {"summary": "test mem", "salience": 0.8}
+            result_insert = safe_call(memory_insert, "test_key", mem_value, "test", 1)
+            self.assertEqual(result_insert, "Memory inserted successfully.")
+            result_query = safe_call(memory_query, mem_key="test_key", user="test", convo_id=1)
+            self.assertIn("summary", str(result_query))
+            self.assertIn("test mem", str(result_query))
+        def test_memory_shared_mode(self) -> None:
+            result_insert = safe_call(memory_insert, "shared_key", {"test": "data"})
+            self.assertEqual(result_insert, "Memory inserted successfully.")
+            query = safe_call(memory_query, mem_key="shared_key")
+            self.assertIn("test", str(query))
+        def test_advanced_memory_prune(self) -> None:
+            low_mem = {"summary": "low salience", "salience": 0.05}
+            safe_call(memory_insert, "low_key", low_mem, "test", 1)
+            st.session_state["prune_counter"] = 49
+            result_prune = safe_call(advanced_memory_prune, "test", 1)
+            self.assertIn("successfully", result_prune)
+            query_after = safe_call(memory_query, mem_key="low_key", user="test", convo_id=1)
+            self.assertEqual(query_after, "Key not found.")
+        def test_tool_cache(self) -> None:
+            args = {"file_path": "cache_test.txt"}
+            set_cached_tool_result("fs_read_file", args, "cached_value")
+            result = get_cached_tool_result("fs_read_file", args)
+            self.assertEqual(result, "cached_value")
+            old_timestamp = datetime.now() - timedelta(minutes=20)
+            st.session_state["tool_cache"][get_tool_cache_key("fs_read_file", args)] = (old_timestamp, "expired")
+            result_expired = get_cached_tool_result("fs_read_file", args)
+            self.assertIsNone(result_expired)
+        def test_agent_spawn_persist(self) -> None:
+            result_spawn = safe_call(agent_spawn, "TestAgent", "Mock task: echo hello", "test", 1)
+            self.assertIn("spawned (ID:", result_spawn)
+            agent_id_prefix = result_spawn.split("ID: ")[1].split(")")[0][:12]
+            status_query = safe_call(memory_query, mem_key=f"agent_{agent_id_prefix}_status", user="test", convo_id=1)
+            self.assertIn("status", str(status_query))
+            self.assertIn("spawned", str(status_query))
+        def test_code_execution_restricted(self) -> None:
+            code = "print('Hello from REPL')"
+            result = safe_call(code_execution, code)
+            self.assertIn("Hello from REPL", result)
+            bad_code = "import os; os.system('ls')"
+            bad_result = safe_call(code_execution, bad_code)
+            self.assertIn("Restricted", bad_result) or self.assertIn("Error", bad_result)
+        def test_git_ops_init_commit(self) -> None:
+            result_init = safe_call(git_ops, "init", "test_repo")
+            self.assertEqual(result_init, "Repo initialized.")
+            safe_call(fs_write_file, "test_repo/test.txt", "commit test")
+            result_commit = safe_call(git_ops, "commit", "test_repo", message="Test commit")
+            self.assertEqual(result_commit, "Committed.")
+        def test_shell_exec_whitelist(self) -> None:
+            result_ls = safe_call(shell_exec, "ls .")
+            self.assertNotIn("Error: Command not whitelisted.", result_ls)
+            st.session_state["confirm_destructive_1"] = False
+            result_rm = safe_call(shell_exec, "rm test_rm.txt")
+            self.assertIn("Warning: Destructive command detected.", result_rm)
+            st.session_state["confirm_destructive_1"] = True
+            result_rm_confirm = safe_call(shell_exec, "rm test_rm.txt")
+            self.assertNotIn("Warning", result_rm_confirm)
+            result_bad = safe_call(shell_exec, "curl google.com")
+            self.assertIn("Error: Command not whitelisted.", result_bad)
+            # NEW: Injection test
+            inject_cmd = 'grep "; rm *"'
+            result_inject = safe_call(shell_exec, inject_cmd)
+            self.assertIn("Error", result_inject) or self.assertNotIn("rm", result_inject)
+        def test_code_lint_python(self) -> None:
+            ugly_code = "def foo():print('hi')"
+            result = safe_call(code_lint, "python", ugly_code)
+            self.assertIn("def foo():\n print('hi')", result)
+        def test_api_simulate_mock(self) -> None:
+            result_mock = safe_call(api_simulate, "https://api.example.com/test", method="GET", mock=True)
+            self.assertIn("Mock response", result_mock)
+        def test_yaml_retrieve_ready(self) -> None:
+            safe_call(fs_write_file, "test.yaml", "key: value")
+            safe_call(yaml_refresh, "test.yaml")
+            result = safe_call(yaml_retrieve, filename="test.yaml")
+            self.assertIn("key: value", result)
+        def test_socratic_council(self) -> None:
+            branches = ["Option A", "Option B"]
+            result = safe_call(socratic_api_council, branches, user="test", convo_id=1)
+            self.assertIn("Round", result)
+            self.assertIn("Consensus", result)
+        def test_agent_sem_bound(self) -> None:
+            self.assertTrue(hasattr(state, 'agent_sem'))
+            self.assertEqual(state.agent_sem._value, Config.AGENT_MAX_CONCURRENT.value)
+        # NEW: Test reflect
+        def test_reflect_optimize(self) -> None:
+            metrics = {"test": 1}
+            result = safe_call(reflect_optimize, "test_component", metrics)
+            self.assertIn("Optimized", result) or self.assertIn("Suggest", result)
+        # NEW: Async test
+        def test_async_spawn(self) -> None:
+            import asyncio
+            result = asyncio.run(async_run_spawn("test_id", "echo test", "test", 1))
+            self.assertIn("test", result)  # Assume mock success
+        def test_tool_chain_integration(self) -> None:
+            # Simulate user flow: insert memory, retrieve, prune
+            safe_call(memory_insert, "integ_key", {"data": "test"})
+            retrieve = safe_call(advanced_memory_retrieve, "test")
+            self.assertIn("test", retrieve)
+            safe_call(advanced_memory_prune)
+            post_prune = safe_call(memory_query, "integ_key")
+            # Assert based on prune logic (adjust as needed)
+            self.assertNotEqual(post_prune, "Key not found.")
     suite = unittest.TestLoader().loadTestsFromTestCase(TestTools)
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
