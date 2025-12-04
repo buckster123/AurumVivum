@@ -156,6 +156,8 @@ class AppState:
         self.yaml_cache = {}
         self.chroma_lock = threading.Lock() # FIX: Phase 1 - For all Chroma ops.
         self._init_yaml_embeddings() # Intentional full init
+        self.counter_lock = threading.Lock()  # FIX: Phase 1 - For global counters
+        self.session_lock = threading.Lock()  # FIX: Phase 2 - For st.session_state accesses
     def _init_resources(self):
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -175,6 +177,8 @@ class AppState:
         except sqlite3.Error as e: # FIX: Phase 1 - Specific except.
             logger.error(f"DB error: {e}")
             st.error(f"Failed to initialize database: {e}. App may not function properly.")
+            if not self.conn:
+                st.error("DB init failed—app limited.")
         except chromadb.errors.InvalidDimensionException as e: # FIX: Phase 1 - Chroma-specific.
             logger.error(f"Chroma error: {e}")
             self.chroma_ready = False
@@ -216,6 +220,7 @@ class AppState:
                 )"""
                 )
                 self.c.execute("CREATE INDEX IF NOT EXISTS idx_memory_timestamp ON memory (timestamp)")
+                self.c.execute("CREATE INDEX IF NOT EXISTS idx_memory_user_convo ON memory (user, convo_id)")  # FIX: Phase 3 - Add index
              
                 self.c.execute("INSERT OR IGNORE INTO users (username, password) VALUES ('shared', ?)", (hash_password(''),))
         except sqlite3.Error as e: # FIX: Phase 1 - Specific.
@@ -225,6 +230,7 @@ class AppState:
         embed_model = self.get_embed_model()
         if embed_model:
             files_refreshed = 0
+            failed = []  # FIX: Phase 1 - Track failed
             for fname in os.listdir(self.yaml_dir):
                 if fname.endswith(".yaml"):
                     path = os.path.join(self.yaml_dir, fname)
@@ -243,7 +249,10 @@ class AppState:
                         files_refreshed += 1
                     except OSError as e: # FIX: Phase 1 & 3 - Specific, skip.
                         logger.error(f"YAML file error for {fname}: {e}")
-            self.yaml_ready = True if files_refreshed > 0 else False # FIX: Phase 3 - Ready only if files.
+                        failed.append(fname)
+            self.yaml_ready = len(failed) == 0 and files_refreshed > 0  # FIX: Phase 1 - Ready only if no fails and files
+            if failed:
+                logger.warning(f"Failed YAML files: {failed}")
             logger.info(f"YAML embeddings inited ({files_refreshed} files).")
         else:
             logger.warning("YAML embeddings skipped – embed model not ready.")
@@ -255,14 +264,18 @@ class AppState:
  
     def get_embed_model(self):
         if self.embed_model is None:
-            try:
-                with st.spinner("Loading embedding model for advanced memory (first-time use)..."):
-                    device = 'cuda' if torch.cuda.is_available() else 'cpu' # FIX: Phase 3 - Device check.
-                    self.embed_model = SentenceTransformer("all-mpnet-base-v2", device=device)
-                st.info("Embedding model loaded successfully.")
-            except Exception as e:
-                logger.error(f"Failed to load embedding model: {e}")
-                st.error(f"Failed to load embedding model: {e}. Some features may be disabled.")
+            for _ in range(3):  # FIX: Phase 2 - Retry 3x
+                try:
+                    with st.spinner("Loading embedding model for advanced memory (first-time use)..."):
+                        device = 'cuda' if torch.cuda.is_available() else 'cpu' # FIX: Phase 3 - Device check.
+                        self.embed_model = SentenceTransformer("all-mpnet-base-v2", device=device)
+                    st.info("Embedding model loaded successfully.")
+                    break
+                except Exception as e:
+                    logger.error(f"Failed to load embedding model (attempt {_+1}): {e}")
+                    time.sleep(5)
+            else:
+                st.error("Failed to load embedding model after retries. Some features may be disabled.")
                 self.embed_model = None
         return self.embed_model
     def lru_evict(self):
@@ -276,7 +289,7 @@ class AppState:
             for _ in range(num_to_evict):
                 key, entry = lru.popitem(last=False)
                 if entry["salience"] < 0.4:
-                    del self.memory_cache["lru_cache"][key]
+                    del self.memory_cache["lru_cache"][key]  # FIX: Phase 1 - Explicit del after pop
 state = AppState.get()
 st.markdown(
     """<style>
@@ -322,6 +335,7 @@ def get_state(key: str, default=None):
         st.session_state[key] = default
     return st.session_state[key]
 def safe_call(func, *args, max_retries=3, **kwargs):
+    start = time.time()  # FIX: Phase 2 - Timing
     for attempt in range(max_retries):
         try:
             result = func(*args, **kwargs)
@@ -340,9 +354,14 @@ def safe_call(func, *args, max_retries=3, **kwargs):
         except Exception as e:
             logger.exception(f"Unexpected error in {func.__name__}: {e}")
             state.stability_score = max(0.0, state.stability_score - Config.STABILITY_PENALTY.value)
+            notify_critical(str(e))  # FIX: Phase 2 - Centralized notify
             return f"Tool glitched: {str(e)[:50]}..."
     state.stability_score = max(0.0, state.stability_score - 0.1)
+    logger.info(f"{func.__name__} took {time.time() - start}s")  # FIX: Phase 2 - Log time
     return "Max retries exceeded."
+def notify_critical(err: str):
+    st.error(f"Critical: {err}")
+    logger.critical(err)
 def get_tool_cache_key(func_name: str, args: dict) -> str:
     try:
         arg_str = json.dumps(args, sort_keys=True)
@@ -350,7 +369,8 @@ def get_tool_cache_key(func_name: str, args: dict) -> str:
         arg_str = str(args) # Fallback to str.
     return f"tool_cache:{func_name}:{hashlib.sha256(arg_str.encode()).hexdigest()}"
 def get_cached_tool_result(func_name: str, args: dict, ttl_minutes: int = Config.CACHE_TTL_MIN.value) -> str | None:
-    cache = get_state("tool_cache", {})
+    with state.session_lock:  # FIX: Phase 2 - Lock session
+        cache = get_state("tool_cache", {})
     key = get_tool_cache_key(func_name, args)
     if key in cache:
         timestamp, result = cache[key]
@@ -358,13 +378,14 @@ def get_cached_tool_result(func_name: str, args: dict, ttl_minutes: int = Config
             return result
     return None
 def set_cached_tool_result(func_name: str, args: dict, result: str):
-    cache = get_state("tool_cache", {})
-    key = get_tool_cache_key(func_name, args)
-    cache[key] = (datetime.now(), result)
-    if len(cache) > 100:
-        oldest_key = min(cache, key=lambda k: cache[k][0])
-        del cache[oldest_key]
-    st.session_state["tool_cache"] = cache
+    with state.session_lock:  # FIX: Phase 2 - Lock
+        cache = get_state("tool_cache", {})
+        key = get_tool_cache_key(func_name, args)
+        cache[key] = (datetime.now(), result)
+        if len(cache) > 100:
+            oldest_key = min(cache, key=lambda k: cache[k][0])
+            del cache[oldest_key]
+        st.session_state["tool_cache"] = cache
 def load_prompt_files() -> list:
     return [f for f in os.listdir(state.prompts_dir) if f.endswith(".txt")]
 def gen_title(first_msg: str) -> str:
@@ -548,13 +569,12 @@ def execute_local(code: str, redirected_output: io.StringIO) -> str:
         tree = ast.parse(code)
         if not all(restricted_policy(node) for node in ast.walk(tree)):
             return "Restricted: Imports banned."
-        if '_print_' in code:  # FIX for common error
-            code = code.replace('_print_', 'print')
-        result = RestrictedPython.compile_restricted_exec(code)
-        if result.errors:
-            return f"Restricted compile error: {result.errors}"
+        # Removed _print_ hack  # FIX: Phase 1 - Remove risky hack
         if 'open' in code: # FIX: Phase 2 - Quick hack ban.
             return "Banned func."
+        result = RestrictedPython.compile_restricted_exec(code)  # <-- Add this missing line
+        if result.errors:
+            return f"Restricted compile error: {result.errors}"
         exec(result.code, st.session_state["repl_namespace"], {})
     except Exception as e:
         return f"Restricted exec error: {e}"
@@ -586,6 +606,10 @@ def memory_insert(
         logger.warning(f"Wrapped mem_value str for '{mem_key}'")
     if not isinstance(mem_value, dict):
         return "Error: mem_value must be a dict (or valid JSON str)."
+    try:
+        json.dumps(mem_value)  # FIX: Phase 1 - Check serializable
+    except TypeError:
+        return "Error: mem_value not JSON-serializable."
     try:
         with state.conn:
             state.c.execute(
@@ -728,11 +752,15 @@ def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user
         logger.error(f"Error consolidating memory: {traceback.format_exc()}")
         return f"Error consolidating memory: {traceback.format_exc()}"
 @inject_user_convo
-@inject_user_convo
 def advanced_memory_retrieve(
     query: str, top_k: int = Config.DEFAULT_TOP_K.value, user: str = 'shared', convo_id: int = 0
 ) -> str:
     tool_limiter_sync()
+    try:
+        convo_id = int(convo_id)  # FIX: Phase 1 - Safe coerce
+    except ValueError:
+        convo_id = 0
+        logger.warning("Invalid convo_id; default to 0")
     cache_args = {"query": query, "top_k": top_k, "user": user, "convo_id": convo_id}
     if cached := get_cached_tool_result("advanced_memory_retrieve", cache_args):
         return cached
@@ -741,7 +769,10 @@ def advanced_memory_retrieve(
     if not embed_model or not state.chroma_ready or not chroma_col:
         logger.warning("Vector memory not available; falling back to keyword search.")
         retrieved = keyword_search(query, top_k, user=user, convo_id=convo_id)
-        result = json.dumps(retrieved)
+        if isinstance(retrieved, str) and "error" in retrieved.lower():  # FIX: Phase 1 - Check type
+            result = retrieved
+        else:
+            result = json.dumps(retrieved)
         set_cached_tool_result("advanced_memory_retrieve", cache_args, result)
         return result
     try:
@@ -755,7 +786,7 @@ def advanced_memory_retrieve(
         where_clause = {
             "$and": [
                 {"user": {"$eq": user}},
-                {"convo_id": {"$eq": int(convo_id)}}, # Ensure int
+                {"convo_id": {"$eq": convo_id}},
             ]
         }
         with state.chroma_lock: # FIX: Phase 1 - Lock.
@@ -829,7 +860,8 @@ def process_chroma_results(results: dict, top_k: int) -> list:
             }
         )
         ids_to_update.append(results["ids"][0][i])
-        metadata_to_update.append({"salience": meta.get("salience", 1.0) + 0.1})
+        new_salience = min(1.0, meta.get("salience", 1.0) + 0.1)  # FIX: Phase 1 - Cap
+        metadata_to_update.append({"salience": new_salience})
     if ids_to_update:
         with state.chroma_lock: # FIX: Phase 1 - Lock.
             state.chroma_collection.update(
@@ -853,7 +885,7 @@ def should_prune() -> bool:
     st.session_state["prune_counter"] += 1
     return st.session_state["prune_counter"] % Config.PRUNE_FREQUENCY.value == 0
 def decay_salience(user: str, convo_id: int):
-    one_week_ago = datetime.now() - timedelta(days=7)
+    one_week_ago = (datetime.now() - timedelta(days=7)).isoformat()  # FIX: Phase 1 - ISO str
     with state.conn:
         state.c.execute(
             "UPDATE memory SET salience = salience * 0.99 WHERE user=? AND convo_id=? AND timestamp < ?",
@@ -877,6 +909,12 @@ def size_based_prune(user: str, convo_id: int):
                 (user, convo_id, row_count - 1000),
             )
             low_keys = [row[0] for row in state.c.fetchall()]
+            if not low_keys:  # FIX: Phase 1 - If no low, delete oldest
+                state.c.execute(
+                    "SELECT mem_key FROM memory WHERE user=? AND convo_id=? ORDER BY timestamp ASC LIMIT ?",
+                    (user, convo_id, row_count - 1000),
+                )
+                low_keys = [row[0] for row in state.c.fetchall()]
             state.c.executemany(
                 "DELETE FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
                 [(user, convo_id, key) for key in low_keys]
@@ -912,7 +950,7 @@ def advanced_memory_prune(user: str = 'shared', convo_id: int = 0) -> str:
                 prune_low_salience(u, cid)
                 size_based_prune(u, cid)
                 dedup_prune(u, cid)
-                one_week_ago = datetime.now() - timedelta(days=7)
+                one_week_ago = (datetime.now() - timedelta(days=7)).isoformat()  # FIX: Phase 1 - ISO
                 state.c.execute(
                     "DELETE FROM memory WHERE user=? AND convo_id=? AND timestamp < ? AND mem_key LIKE 'agent_%'",
                     (u, cid, one_week_ago),
@@ -922,7 +960,7 @@ def advanced_memory_prune(user: str = 'shared', convo_id: int = 0) -> str:
                 folder_path = os.path.join(state.agent_dir, agent_folder)
                 if os.path.isdir(folder_path):
                     files = [f for f in os.listdir(folder_path) if f.endswith('.json')]
-                    if files and os.path.getmtime(os.path.join(folder_path, files[0])) < one_week_ago.timestamp():
+                    if files and os.path.getmtime(os.path.join(folder_path, files[0])) < (datetime.now() - timedelta(days=7)).timestamp():
                         shutil.rmtree(folder_path)
                         logger.info(f"Pruned old agent folder: {agent_folder}")
             state.lru_evict()
@@ -985,6 +1023,8 @@ def viz_memory_lattice(
         all_embs = [cached_embed(summaries[i]) for i in range(len(summaries))]
         for i, node_i in enumerate(G.nodes):
             candidates = list(G.nodes)[i+1:]
+            if len(candidates) == 0:  # FIX: Phase 1 - Handle small
+                continue
             sampled = np.random.choice(candidates, min(3, len(candidates)), replace=False) # OPTIMIZED: Sample less
             for node_j in sampled:
                 j_idx = list(G.nodes).index(node_j)
@@ -992,7 +1032,7 @@ def viz_memory_lattice(
                 if sim > sim_threshold:
                     G.add_edge(node_i, node_j, weight=sim)
     if plot_type in ["graph", "both"]:
-        pos = nx.spring_layout(G, k=1, iterations=10) # Reduced iterations for speed
+        pos = nx.spring_layout(G, k=1, iterations=5) # Reduced iterations for speed - FIX: Phase 3
         edge_x, edge_y = [], []
         for edge in G.edges():
             x0, y0 = pos[edge[0]]
@@ -1096,7 +1136,11 @@ def visualize_got(
     import matplotlib.pyplot as plt
     import os
     import numpy as np
-    from ascii_graph import Pyasciigraph  # Optional: pip install ascii_graph if wanted for text mode
+    try:
+        from ascii_graph import Pyasciigraph  # FIX: Phase 1 - Import here, handle missing
+    except ImportError:
+        if format == "text":
+            return "ASCII not available - install ascii_graph."
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1237,7 +1281,7 @@ def agent_spawn(sub_agent_type: str, task: str, user: str = 'shared', convo_id: 
     if auto_poll:
         max_polls = 30
         for _ in range(max_polls):
-            time.sleep(poll_interval)
+            time.sleep(poll_interval)  # FIXME: Non-async sleep - for hobby, OK; later thread
             complete = memory_query(mem_key=f"agent_{agent_id}_complete", user=user, convo_id=convo_id)
             if complete != "Key not found.":
                 return f"Polled result: {complete}"
@@ -1372,13 +1416,13 @@ def shell_exec(command: str) -> str:
     for arg in cmd_parts[1:]: # FIX: Phase 2 - Arg validation.
         if re.search(r'[;&|><$]', arg):
             return "Invalid arg chars."
+        if re.search(r'[\*\?\[\]]|\.\./', arg):  # FIX: Phase 1 - Better forbidden
+            return "Error: Forbidden patterns in args."
     convo_id = st.session_state.get("current_convo_id", 0)
     confirm_key = f"confirm_destructive_{convo_id}"
     if cmd_base in ["rm", "rmdir"] and not get_state(confirm_key, False):
         st.session_state[confirm_key] = True
         return "Warning: Destructive command detected. Confirm by re-running."
-    if any(arg in ["*", ".."] for arg in cmd_parts[1:]):
-        return "Error: Forbidden args (*, ..) in command."
     # FIXED: Quote args to prevent injection
     quoted_parts = [shlex.quote(part) for part in cmd_parts]
     try:
@@ -1807,12 +1851,22 @@ def yaml_refresh(filename: str = None) -> str:
                     content = f.read()
                 embedding = embed_model.encode(content).tolist()
                 with state.chroma_lock: # FIX: Phase 1 - Lock.
-                    col.upsert(
-                        ids=[filename],
-                        embeddings=[embedding],
-                        documents=[content],
-                        metadatas=[{"filename": filename}],
-                    )
+                    # FIX: Phase 3 - Check exists, update vs upsert
+                    existing = col.get(where={"filename": filename})
+                    if existing["ids"]:
+                        col.update(
+                            ids=existing["ids"],
+                            embeddings=[embedding],
+                            documents=[content],
+                            metadatas=[{"filename": filename}],
+                        )
+                    else:
+                        col.upsert(
+                            ids=[filename],
+                            embeddings=[embedding],
+                            documents=[content],
+                            metadatas=[{"filename": filename}],
+                        )
                 state.yaml_cache[filename] = content
                 return f"YAML '{filename}' refreshed successfully."
             except OSError as e:
@@ -1838,7 +1892,12 @@ def yaml_refresh(filename: str = None) -> str:
                     except OSError as e:
                         logger.error(f"YAML file error for {fname}: {e}")
             if contents:
-                embeddings = embed_model.encode(contents).tolist() # FIX: Phase 3 - Batch.
+                if len(contents) > 10:  # FIX: Phase 3 - Batch with threads if large
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        embeddings = list(executor.map(embed_model.encode, contents))
+                    embeddings = [emb.tolist() for emb in embeddings]
+                else:
+                    embeddings = embed_model.encode(contents).tolist()
                 metadatas = [{"filename": fn} for fn in fnames]
                 with state.chroma_lock: # FIX: Phase 1 - Lock.
                     col.upsert(
@@ -1941,14 +2000,19 @@ for func in TOOL_FUNCS:
             for k, v in kwargs.items():
                 if k in sig.parameters:
                     ann = sig.parameters[k].annotation
-                    if ann is int and isinstance(v, str):
-                        coerced_kwargs[k] = int(v)
-                    elif ann is bool and isinstance(v, str):
-                        coerced_kwargs[k] = v.lower() in ('true', '1', 'yes')
-                    elif ann is float and isinstance(v, str):
-                        coerced_kwargs[k] = float(v)
-                    else:
-                        coerced_kwargs[k] = v
+                    try:  # FIX: Phase 1 - Catch coercion
+                        if ann is int and isinstance(v, str):
+                            coerced_kwargs[k] = int(v)
+                        elif ann is bool and isinstance(v, str):
+                            coerced_kwargs[k] = v.lower() in ('true', '1', 'yes')
+                        elif ann is float and isinstance(v, str):
+                            coerced_kwargs[k] = float(v)
+                        elif ann is list and isinstance(v, str):
+                            coerced_kwargs[k] = v.split(',')  # FIX: Phase 2 - Simple list coerce
+                        else:
+                            coerced_kwargs[k] = v
+                    except ValueError:
+                        return f"Arg type error for {k}: {v}"
                 else:
                     coerced_kwargs[k] = v
             logger.info(f"Calling {f.__name__} with args: {coerced_kwargs}")
@@ -1981,11 +2045,13 @@ def _handle_single_tool(tool_call, current_messages, enable_tools):
     except Exception as e:
         result = f"Error calling tool {func_name}: {e}"
     if func_name == "socratic_api_council":
-        global council_count
-        council_count += 1
+        with state.counter_lock:  # FIX: Phase 1 - Lock counters
+            global council_count
+            council_count += 1
     else:
-        global tool_count
-        tool_count += 1
+        with state.counter_lock:
+            global tool_count
+            tool_count += 1
         st.session_state.setdefault("tool_calls_per_convo", 0)
         st.session_state["tool_calls_per_convo"] += 1
     logger.info(f"Tool call: {func_name} - Result: {str(result)[:200]}... Stability: {state.stability_score}") # FIX: Phase 3 - Log stability.
@@ -2040,7 +2106,7 @@ def call_xai_api(
             return
      
         # FIXED: Use local flag to avoid UnboundLocalError
-        current_enable_xai_tools = enable_xai_tools
+        current_enable_xai_tools = enable_xai_tools  # FIX: Phase 1 - Local copy
      
         # Configure search_parameters for xAI natives
         extra_body = {}
@@ -2061,8 +2127,10 @@ def call_xai_api(
             logger.info(f"Enabled xAI live search with params: {search_params}")
      
         retry_count = 0 # FIX: Phase 1 - Cap retries.
+        start_time = time.time()  # FIX: Phase 3 - Total timeout
         for iteration in range(max_iterations):
-            main_count += 1
+            with state.counter_lock:  # FIX: Phase 1 - Lock
+                main_count += 1
             logger.info(
                 f"API call: Tools: {tool_count} | Council: {council_count} | Main: {main_count} | Iteration: {iteration + 1} | Search Enabled: {current_enable_xai_tools}"
             )
@@ -2079,16 +2147,22 @@ def call_xai_api(
                 tool_calls = []
                 full_delta_response = ""
                 sources_used = 0 # Track for logging
+                chunk_buffer = ""  # FIX: Phase 3 - Buffer yields
                 for chunk in response:
                     delta = chunk.choices[0].delta
                     if delta and delta.content:
-                        yield delta.content
+                        chunk_buffer += delta.content
+                        if len(chunk_buffer.split()) > 3:  # Yield every ~3 words
+                            yield chunk_buffer
+                            chunk_buffer = ""
                         full_delta_response += delta.content
                     if delta and delta.tool_calls:
                         tool_calls.extend(delta.tool_calls)
                     # Log sources in final chunk (non-streaming fallback)
                     if chunk.usage and hasattr(chunk.usage, 'num_sources_used'):
                         sources_used = chunk.usage.num_sources_used
+                if chunk_buffer:  # Flush remaining
+                    yield chunk_buffer
                 logger.info(f"Search sources used: {sources_used}")
              
                 if not tool_calls:
@@ -2150,6 +2224,9 @@ def call_xai_api(
                 yield f"\n{error_msg}"
                 logger.error(f"Unexpected error in API call: {traceback.format_exc()}")
                 break
+            if time.time() - start_time > 300:  # FIX: Phase 3 - Cap total
+                yield "Total timeout—aborting."
+                break
     return generate(api_messages)
 def search_history(query: str):
     state.c.execute(
@@ -2158,6 +2235,8 @@ def search_history(query: str):
     )
     return state.c.fetchall()
 def export_convo(format: str = "json"):
+    if "messages" not in st.session_state:  # FIX: Phase 1 - Check
+        return "No convo to export."
     if format == "json":
         return json.dumps(st.session_state["messages"], indent=4)
     elif format == "md":
@@ -2294,7 +2373,8 @@ def render_sidebar():
                     state.memory_cache["lru_cache"] = {}
                     st.success("Cache cleared.")
                 if st.button("Reset Counters"): # FIX: Phase 3.
-                    main_count = tool_count = council_count = 0
+                    with state.counter_lock:
+                        main_count = tool_count = council_count = 0
                 # NEW: Tool Logs Expander
                 if st.button("Show Recent Tool Logs"):
                     with st.expander("Tool Logs", expanded=False):
@@ -2543,6 +2623,11 @@ def run_tests():
                 metrics = {"test": 1}
                 result = safe_call(reflect_optimize, "test_component", metrics)
                 self.assertIn("Optimized", result) or self.assertIn("Suggest", result)
+            # NEW: Async test
+            def test_async_spawn(self):
+                import asyncio
+                result = asyncio.run(async_run_spawn("test_id", "echo test", "test", 1))
+                self.assertIn("test", result)  # Assume mock success
     suite = unittest.TestLoader().loadTestsFromTestCase(TestTools)
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
