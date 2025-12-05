@@ -47,7 +47,7 @@ These agents complement each other like shadow and light: same modular internals
 
 Aurum Vivum's script is a Streamlit-based chat app with modular internals: app state management, API calls, tool dispatching, and memory vectors. The agents share this backbone but infuse their unique semantics.
 
-### Script Flowchart (Mermaid)
+### Script Flowchart
 
 ```mermaid
 graph TD
