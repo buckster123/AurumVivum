@@ -440,35 +440,36 @@ def auto_optimize_prompt(current_prompt: str, user: str, convo_id: int, metrics:
     except Exception as e:
         logger.error(f"Prompt optimize error: {e}")
         return current_prompt
-@st.cache_data(ttl=300, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True)}) # Added hash for dicts
-async def fs_read_file(file_path: str) -> str:
-    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.') # Safer paths
+@st.cache_data(ttl=300, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True)})  # Keep cache
+def fs_read_file(file_path: str) -> str:
+    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.')  # Safer paths
     safe_path = safe_path.resolve()
     if not safe_path.is_relative_to(pathlib.Path(state.sandbox_dir).resolve()):
         return "Error: Path is outside the sandbox."
     if not safe_path.exists():  # Proactive check
         if safe_path.suffix in ['.yaml', '.lattice']:  # Auto-create defaults for configs
             safe_path.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(safe_path, 'w') as f:
-                await f.write('{}')  # Empty dict as default
+            with open(safe_path, 'w') as f:
+                f.write('{}')  # Empty dict as default
             logger.info(f"Auto-created missing file: {file_path}")
         else:
             return "Error: File not found."
     try:
-        async with aiofiles.open(safe_path, "r", encoding="utf-8") as f:
-            return await f.read()
+        with open(safe_path, "r", encoding="utf-8") as f:
+            return f.read()
     except Exception as e:
         logger.error(f"Error reading file: {e}")
         return f"Error reading file: {e}"
-async def fs_write_file(file_path: str, content: str) -> str:
-    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.') # Safer
+
+def fs_write_file(file_path: str, content: str) -> str:
+    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.')  # Safer
     safe_path = safe_path.resolve()
     if not safe_path.is_relative_to(pathlib.Path(state.sandbox_dir).resolve()):
         return "Error: Path is outside the sandbox."
     try:
         content = html.unescape(content)
-        async with aiofiles.open(safe_path, "w", encoding="utf-8") as f:
-            await f.write(content)
+        with open(safe_path, "w", encoding="utf-8") as f:
+            f.write(content)
         if "tool_cache" in st.session_state:
             key_to_remove = get_tool_cache_key("fs_read_file", {"file_path": file_path})
             st.session_state["tool_cache"].pop(key_to_remove, None)
@@ -819,7 +820,7 @@ def advanced_memory_retrieve(
         loop = asyncio.get_event_loop()
         future = loop.run_in_executor(None, embed_model.encode, query)
         try:
-            query_emb = loop.run_until_complete(asyncio.wait_for(future, timeout=60.0)).tolist()
+            query_emb = loop.run_until_complete(asyncio.wait_for(future, timeout=300.0)).tolist()
         except asyncio.TimeoutError:
             logger.warning("Embed timeout - Fallback to keyword search.")
             return fallback_to_keyword(query, top_k, user, convo_id)
@@ -1473,7 +1474,7 @@ def shell_exec(command: str) -> str:
     quoted_parts = [shlex.quote(part) for part in cmd_parts]
     try:
         result = subprocess.run(
-            quoted_parts, cwd=state.sandbox_dir, capture_output=True, text=True, timeout=60, shell=False # shell=False
+            quoted_parts, cwd=state.sandbox_dir, capture_output=True, text=True, timeout=300, shell=False # shell=False
         )
         return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
     except Exception as e:
@@ -1734,7 +1735,7 @@ def isolated_subprocess(cmd: str, custom_env: dict = None) -> str:
             capture_output=True,
             text=True,
             env=env,
-            timeout=60,
+            timeout=300,
             cwd=state.sandbox_dir,
         )
         return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
@@ -1742,7 +1743,7 @@ def isolated_subprocess(cmd: str, custom_env: dict = None) -> str:
         logger.error(f"Subprocess error: {e}")
         return f"Subprocess error: {e}"
 PIP_WHITELIST = [
-    "numpy<2.0",  # Pinned for ARM compat if needed
+    "numpy",  # Pinned for ARM compat if needed
     "pandas",
     "matplotlib",
     "scipy",
@@ -1765,10 +1766,10 @@ def pip_install(venv_path: str, packages: list, upgrade: bool = False) -> str:
         return "Error: Pip not found in venv."
     cmd = [venv_pip, "install", "--no-deps"] + (["--upgrade"] if upgrade else []) + packages
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if "Error" in result.stderr and "--no-deps" in cmd: # FIX: Phase 2 - Try without no-deps.
             cmd.remove("--no-deps")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             logger.warning("Retried without --no-deps.")
         return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
     except Exception as e:
