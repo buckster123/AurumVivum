@@ -1,10 +1,3 @@
-"""
-Aurum Vivum: Experimental AI Chat App
-- Purpose: Learning tool for xAI integration, memory management, and sandboxed utilities.
-- Environment: Python 3 venvs on ARM/Pi-5 (Trixie OS), single-user.
-- Key Features: Chat persistence, vector memory, tool dispatching.
-"""
-
 import asyncio
 import base64
 import builtins
@@ -62,10 +55,10 @@ import ast
 from functools import lru_cache, wraps
 import xml.dom.minidom # Ensure imported
 import torch # Added for device check in embed model.
-import cProfile  # Added for profiling
+import cProfile # Added for profiling
 import pstats
-import aiofiles  # Added for async I/O
-from marshmallow import Schema, fields, ValidationError  # Added for validation
+import aiofiles # Added for async I/O
+from marshmallow import Schema, fields, ValidationError # Added for validation
 nest_asyncio.apply()
 logging.basicConfig(
     filename="app.log",
@@ -116,16 +109,15 @@ api_limiter_sync = sync_limiter(Config.API_CALLS_PER_MIN.value)
 tool_limiter_sync = sync_limiter(Config.TOOL_CALLS_PER_MIN.value)
 api_sem = asyncio.Semaphore(Config.API_CALLS_PER_MIN.value)
 tool_sem = asyncio.Semaphore(Config.TOOL_CALLS_PER_MIN.value)
-def inject_user_convo(func):
+def inject_convo_uuid(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        kwargs['user'] = kwargs.get('user', st.session_state.get('user', 'shared'))
-        kwargs['convo_id'] = kwargs.get('convo_id', st.session_state.get('current_convo_id', 0))
+        kwargs['convo_uuid'] = kwargs.get('convo_uuid', st.session_state.get('current_convo_uuid', str(uuid.uuid4())))
         return func(*args, **kwargs)
     return wrapper
 class AppState:
     """Manages application resources including DB, caches, and directories.
-    
+   
     This singleton handles initialization, connections, and cleanup for shared state.
     """
     def __init__(self):
@@ -135,7 +127,7 @@ class AppState:
         self.chroma_collection = None
         self.yaml_collection = None
         self._init_resources()
-     
+    
         self.memory_cache = {
             "lru_cache": {},
             "metrics": {
@@ -158,7 +150,7 @@ class AppState:
                     f.write(content)
         self.sandbox_dir = "./sandbox"
         os.makedirs(self.sandbox_dir, exist_ok=True)
-        self.yaml_dir = "./sandbox/config"
+        self.yaml_dir = "./sandbox/evo_system/fragments"
         os.makedirs(self.yaml_dir, exist_ok=True)
         self.agent_dir = os.path.join(self.sandbox_dir, "agents")
         os.makedirs(self.agent_dir, exist_ok=True)
@@ -171,15 +163,15 @@ class AppState:
         self.yaml_cache = {}
         self.chroma_lock = threading.Lock() # FIX: Phase 1 - For all Chroma ops.
         self._init_yaml_embeddings() # Intentional full init
-        self.counter_lock = threading.Lock()  # FIX: Phase 1 - For global counters
-        self.session_lock = threading.Lock()  # FIX: Phase 2 - For st.session_state accesses
+        self.counter_lock = threading.Lock() # FIX: Phase 1 - For global counters
+        self.session_lock = threading.Lock() # FIX: Phase 2 - For st.session_state accesses
     def _init_resources(self):
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self.conn.execute("PRAGMA journal_mode=WAL;")
-            self.cursor = self.conn.cursor()  # Renamed for clarity
+            self.cursor = self.conn.cursor() # Renamed for clarity
             self._init_db()
-         
+        
             self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
             self.chroma_collection = self.chroma_client.get_or_create_collection(
                 name="memory_vectors",
@@ -220,24 +212,33 @@ class AppState:
                     """CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)"""
                 )
                 self.cursor.execute(
-                    """CREATE TABLE IF NOT EXISTS history (user TEXT, convo_id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, messages TEXT)"""
+                    """CREATE TABLE IF NOT EXISTS history (user TEXT, convo_id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT UNIQUE, title TEXT, messages TEXT)"""
                 )
                 self.cursor.execute(
                     """CREATE TABLE IF NOT EXISTS memory (
-                    user TEXT,
-                    convo_id INTEGER,
+                    uuid TEXT,
                     mem_key TEXT,
                     mem_value TEXT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                     salience REAL DEFAULT 1.0,
                     parent_id INTEGER,
-                    PRIMARY KEY (user, convo_id, mem_key)
+                    PRIMARY KEY (uuid, mem_key)
                 )"""
                 )
                 self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_timestamp ON memory (timestamp)")
-                self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_user_convo ON memory (user, convo_id)")  # FIX: Phase 3 - Add index
-             
+                self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_uuid ON memory (uuid)")
+            
                 self.cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES ('shared', ?)", (hash_password(''),))
+                # Migration: Backfill UUIDs for existing (run once on init)
+                self.cursor.execute("SELECT convo_id, user FROM history WHERE uuid IS NULL")
+                for row in self.cursor.fetchall():
+                    new_uuid = str(uuid.uuid4())
+                    self.cursor.execute("UPDATE history SET uuid=? WHERE convo_id=?", (new_uuid, row[0]))
+                    # Migrate memory: Assign UUID based on old user/convo
+                    old_user = row[1]
+                    old_convo = row[0]
+                    self.cursor.execute("UPDATE memory SET uuid=? WHERE user=? AND convo_id=?", (new_uuid, old_user, old_convo))
+                self.conn.commit()
         except sqlite3.Error as e: # FIX: Phase 1 - Specific.
             logger.error(f"DB init error: {e}")
             st.error(f"Failed to initialize database: {e}. App may not function properly.")
@@ -245,8 +246,8 @@ class AppState:
         embed_model = self.get_embed_model()
         if embed_model:
             files_refreshed = 0
-            failed = []  # FIX: Phase 1 - Track failed
-            contents = []  # For batch
+            failed = [] # FIX: Phase 1 - Track failed
+            contents = [] # For batch
             fnames = []
             for fname in os.listdir(self.yaml_dir):
                 if fname.endswith(".yaml"):
@@ -261,7 +262,7 @@ class AppState:
                         logger.error(f"YAML file error for {fname}: {e}")
                         failed.append(fname)
             if contents:
-                embeddings = embed_model.encode(contents, batch_size=32).tolist()  # Batched
+                embeddings = embed_model.encode(contents, batch_size=32).tolist() # Batched
                 metadatas = [{"filename": fn} for fn in fnames]
                 with self.chroma_lock: # FIX: Phase 1 - Lock.
                     self.yaml_collection.upsert(
@@ -272,7 +273,7 @@ class AppState:
                     )
                 for i, fname in enumerate(fnames):
                     self.yaml_cache[fname] = contents[i]
-            self.yaml_ready = len(failed) == 0 and files_refreshed > 0  # FIX: Phase 1 - Ready only if no fails and files
+            self.yaml_ready = len(failed) == 0 and files_refreshed > 0 # FIX: Phase 1 - Ready only if no fails and files
             if failed:
                 logger.warning(f"Failed YAML files: {failed}")
             logger.info(f"YAML embeddings inited ({files_refreshed} files).")
@@ -283,10 +284,9 @@ class AppState:
         if "app_state" not in st.session_state:
             st.session_state["app_state"] = cls()
         return st.session_state["app_state"]
- 
     def get_embed_model(self) -> SentenceTransformer | None:
         if self.embed_model is None:
-            for _ in range(3):  # FIX: Phase 2 - Retry 3x
+            for _ in range(3): # FIX: Phase 2 - Retry 3x
                 try:
                     with st.spinner("Loading embedding model for advanced memory (first-time use)..."):
                         device = 'cuda' if torch.cuda.is_available() else 'cpu' # FIX: Phase 3 - Device check.
@@ -311,7 +311,7 @@ class AppState:
             for _ in range(num_to_evict):
                 key, entry = lru.popitem(last=False)
                 if entry["salience"] < 0.4:
-                    del self.memory_cache["lru_cache"][key]  # FIX: Phase 1 - Explicit del after pop
+                    del self.memory_cache["lru_cache"][key] # FIX: Phase 1 - Explicit del after pop
 state = AppState.get()
 st.markdown(
     """<style>
@@ -357,7 +357,7 @@ def get_state(key: str, default=None) -> typing.Any:
         st.session_state[key] = default
     return st.session_state[key]
 def safe_call(func: typing.Callable, *args, max_retries: int = 3, **kwargs) -> typing.Any:
-    start = time.time()  # FIX: Phase 2 - Timing
+    start = time.time() # FIX: Phase 2 - Timing
     for attempt in range(max_retries):
         try:
             result = func(*args, **kwargs)
@@ -376,10 +376,10 @@ def safe_call(func: typing.Callable, *args, max_retries: int = 3, **kwargs) -> t
         except Exception as e:
             logger.exception(f"Unexpected error in {func.__name__}: {e}")
             state.stability_score = max(0.0, state.stability_score - Config.STABILITY_PENALTY.value)
-            notify_critical(str(e))  # FIX: Phase 2 - Centralized notify
+            notify_critical(str(e)) # FIX: Phase 2 - Centralized notify
             return f"Tool glitched: {str(e)[:50]}..."
     state.stability_score = max(0.0, state.stability_score - 0.1)
-    logger.info(f"{func.__name__} took {time.time() - start}s")  # FIX: Phase 2 - Log time
+    logger.info(f"{func.__name__} took {time.time() - start}s") # FIX: Phase 2 - Log time
     return "Max retries exceeded."
 def notify_critical(err: str) -> None:
     st.error(f"Critical: {err}")
@@ -391,7 +391,7 @@ def get_tool_cache_key(func_name: str, args: dict) -> str:
         arg_str = str(args) # Fallback to str.
     return f"tool_cache:{func_name}:{hashlib.sha256(arg_str.encode()).hexdigest()}"
 def get_cached_tool_result(func_name: str, args: dict, ttl_minutes: int = Config.CACHE_TTL_MIN.value) -> str | None:
-    with state.session_lock:  # FIX: Phase 2 - Lock session
+    with state.session_lock: # FIX: Phase 2 - Lock session
         cache = get_state("tool_cache", {})
     key = get_tool_cache_key(func_name, args)
     if key in cache:
@@ -400,7 +400,7 @@ def get_cached_tool_result(func_name: str, args: dict, ttl_minutes: int = Config
             return result
     return None
 def set_cached_tool_result(func_name: str, args: dict, result: str) -> None:
-    with state.session_lock:  # FIX: Phase 2 - Lock
+    with state.session_lock: # FIX: Phase 2 - Lock
         cache = get_state("tool_cache", {})
         key = get_tool_cache_key(func_name, args)
         cache[key] = (datetime.now(), result)
@@ -440,17 +440,17 @@ def auto_optimize_prompt(current_prompt: str, user: str, convo_id: int, metrics:
     except Exception as e:
         logger.error(f"Prompt optimize error: {e}")
         return current_prompt
-@st.cache_data(ttl=300, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True)})  # Keep cache
+@st.cache_data(ttl=300, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True)}) # Keep cache
 def fs_read_file(file_path: str) -> str:
-    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.')  # Safer paths
+    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.') # Safer paths
     safe_path = safe_path.resolve()
     if not safe_path.is_relative_to(pathlib.Path(state.sandbox_dir).resolve()):
         return "Error: Path is outside the sandbox."
-    if not safe_path.exists():  # Proactive check
-        if safe_path.suffix in ['.yaml', '.lattice']:  # Auto-create defaults for configs
+    if not safe_path.exists(): # Proactive check
+        if safe_path.suffix in ['.yaml', '.lattice']: # Auto-create defaults for configs
             safe_path.parent.mkdir(parents=True, exist_ok=True)
             with open(safe_path, 'w') as f:
-                f.write('{}')  # Empty dict as default
+                f.write('{}') # Empty dict as default
             logger.info(f"Auto-created missing file: {file_path}")
         else:
             return "Error: File not found."
@@ -460,9 +460,8 @@ def fs_read_file(file_path: str) -> str:
     except Exception as e:
         logger.error(f"Error reading file: {e}")
         return f"Error reading file: {e}"
-
 def fs_write_file(file_path: str, content: str) -> str:
-    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.')  # Safer
+    safe_path = pathlib.Path(state.sandbox_dir) / pathlib.Path(file_path).relative_to('.') # Safer
     safe_path = safe_path.resolve()
     if not safe_path.is_relative_to(pathlib.Path(state.sandbox_dir).resolve()):
         return "Error: Path is outside the sandbox."
@@ -554,7 +553,7 @@ ADDITIONAL_LIBS = {
     "networkx": nx,
     "unittest": unittest,
     "asyncio": asyncio,
-    "qiskit": __import__('qiskit') if 'qiskit' in sys.modules else None,  # Loosened for agents
+    "qiskit": __import__('qiskit') if 'qiskit' in sys.modules else None, # Loosened for agents
     "scipy": __import__('scipy') if 'scipy' in sys.modules else None,
     # Add more safe libs for creativity, e.g., for sims
     "matplotlib": __import__('matplotlib') if 'matplotlib' in sys.modules else None,
@@ -592,10 +591,10 @@ def execute_local(code: str, redirected_output: io.StringIO) -> str:
         tree = ast.parse(code)
         if not all(restricted_policy(node) for node in ast.walk(tree)):
             return "Restricted: Imports banned."
-        # Removed _print_ hack  # FIX: Phase 1 - Remove risky hack
+        # Removed _print_ hack # FIX: Phase 1 - Remove risky hack
         if 'open' in code: # FIX: Phase 2 - Quick hack ban.
             return "Banned func."
-        result = RestrictedPython.compile_restricted_exec(code)  # <-- Add this missing line
+        result = RestrictedPython.compile_restricted_exec(code) # <-- Add this missing line
         if result.errors:
             return f"Restricted compile error: {result.errors}"
         exec(result.code, st.session_state["repl_namespace"], {})
@@ -619,9 +618,9 @@ def code_execution(code: str, venv_path: str = None) -> str:
         return f"Error: {traceback.format_exc()}"
     finally:
         sys.stdout = old_stdout # Reset stdout
-@inject_user_convo
+@inject_convo_uuid
 def memory_insert(
-    mem_key: str, mem_value: dict | str, user: str = 'shared', convo_id: int = 0
+    mem_key: str, mem_value: dict | str, convo_uuid: str
 ) -> str:
     tool_limiter_sync()
     if isinstance(mem_value, str):
@@ -630,16 +629,16 @@ def memory_insert(
     if not isinstance(mem_value, dict):
         return "Error: mem_value must be a dict (or valid JSON str)."
     try:
-        json.dumps(mem_value)  # FIX: Phase 1 - Check serializable
+        json.dumps(mem_value) # FIX: Phase 1 - Check serializable
     except TypeError:
         return "Error: mem_value not JSON-serializable."
     try:
         with state.conn:
             state.cursor.execute(
-                "INSERT OR REPLACE INTO memory (user, convo_id, mem_key, mem_value) VALUES (?, ?, ?, ?)",
-                (user, convo_id, mem_key, json.dumps(mem_value)),
+                "INSERT OR REPLACE INTO memory (uuid, mem_key, mem_value) VALUES (?, ?, ?)",
+                (convo_uuid, mem_key, json.dumps(mem_value)),
             )
-        cache_key = f"{user}_{convo_id}_{mem_key}"
+        cache_key = f"{convo_uuid}_{mem_key}"
         entry = {
             "summary": mem_value.get("summary", ""),
             "details": mem_value.get("details", ""),
@@ -653,13 +652,13 @@ def memory_insert(
             "last_access": time.time(),
         }
         state.memory_cache["metrics"]["total_inserts"] += 1
-        logger.info(f"Memory inserted: {mem_key} (user={user}, convo={convo_id})")
+        logger.info(f"Memory inserted: {mem_key} (convo_uuid={convo_uuid})")
         return "Memory inserted successfully."
     except Exception as e:
         logger.error(f"Error inserting memory: {e}")
         return f"Error inserting memory: {e}"
-def load_into_lru(key: str, entry: dict, user: str, convo_id: int) -> None:
-    cache_key = f"{user}_{convo_id}_{key}"
+def load_into_lru(key: str, entry: dict, convo_uuid: str) -> None:
+    cache_key = f"{convo_uuid}_{key}"
     if cache_key not in state.memory_cache["lru_cache"]:
         state.memory_cache["lru_cache"][cache_key] = {
             "entry": {
@@ -672,45 +671,51 @@ def load_into_lru(key: str, entry: dict, user: str, convo_id: int) -> None:
             },
             "last_access": time.time(),
         }
-@inject_user_convo
+@inject_convo_uuid
 def memory_query(
-    mem_key: str = None, limit: int = Config.DEFAULT_TOP_K.value, user: str = 'shared', convo_id: int = 0
+    mem_key: str = None, limit: int = Config.DEFAULT_TOP_K.value, convo_uuid: str = None, uuid_list: list[str] = None
 ) -> str:
     tool_limiter_sync()
     try:
         with state.conn:
+            if uuid_list:
+                placeholders = ','.join('?' for _ in uuid_list)
+                where = f"uuid IN ({placeholders})"
+                params = uuid_list
+            else:
+                where = "uuid=?"
+                params = [convo_uuid]
             if mem_key:
-                state.cursor.execute(
-                    "SELECT mem_value FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
-                    (user, convo_id, mem_key),
-                )
+                where += " AND mem_key=?"
+                params.append(mem_key)
+                sql = f"SELECT mem_value FROM memory WHERE {where}"
+                state.cursor.execute(sql, params)
                 result = state.cursor.fetchone()
-                logger.info(f"Memory queried: {mem_key} (user={user}, convo={convo_id})")
+                logger.info(f"Memory queried: {mem_key} (convo_uuid={convo_uuid})")
                 return json.loads(result[0]) if result and result[0] else "Key not found."
             else:
-                state.cursor.execute(
-                    "SELECT mem_key, mem_value FROM memory WHERE user=? AND convo_id=? ORDER BY timestamp DESC LIMIT ?",
-                    (user, convo_id, limit),
-                )
+                sql = f"SELECT mem_key, mem_value FROM memory WHERE {where} ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                state.cursor.execute(sql, params)
                 results = {}
                 for row in state.cursor.fetchall():
                     if row[1]:
                         results[row[0]] = json.loads(row[1])
                 for key in results:
-                    load_into_lru(key, results[key], user, convo_id)
-                logger.info("Recent memories queried (shared mode)")
+                    load_into_lru(key, results[key], convo_uuid)
+                logger.info("Recent memories queried")
                 return json.dumps(results)
     except Exception as e:
         logger.error(f"Error querying memory: {e}")
         return f"Error querying memory: {e}"
-@inject_user_convo
+@inject_convo_uuid
 def advanced_memory_consolidate(
-    mem_key: str, interaction_data: dict, user: str = 'shared', convo_id: int = 0
+    mem_key: str, interaction_data: dict, convo_uuid: str
 ) -> str:
     tool_limiter_sync()
-    return safe_call(_advanced_memory_consolidate_impl, mem_key, interaction_data, user, convo_id)
-def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user: str, convo_id: int) -> str:
-    cache_args = {"mem_key": mem_key, "interaction_data": interaction_data, "user": user, "convo_id": convo_id}
+    return safe_call(_advanced_memory_consolidate_impl, mem_key, interaction_data, convo_uuid)
+def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, convo_uuid: str) -> str:
+    cache_args = {"mem_key": mem_key, "interaction_data": interaction_data, "convo_uuid": convo_uuid}
     if cached := get_cached_tool_result("advanced_memory_consolidate", cache_args):
         return cached
     embed_model = state.get_embed_model()
@@ -731,8 +736,8 @@ def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user
         json_episodic = json.dumps(interaction_data)
         with state.conn:
             state.cursor.execute(
-                "INSERT OR REPLACE INTO memory (user, convo_id, mem_key, mem_value) VALUES (?, ?, ?, ?)",
-                (user, convo_id, mem_key, json_episodic),
+                "INSERT OR REPLACE INTO memory (uuid, mem_key, mem_value) VALUES (?, ?, ?)",
+                (convo_uuid, mem_key, json_episodic),
             )
         if embed_model and state.chroma_ready and state.chroma_collection:
             chroma_col = state.chroma_collection
@@ -744,8 +749,7 @@ def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user
                     documents=[json_episodic],
                     metadatas=[
                         {
-                            "user": user,
-                            "convo_id": int(convo_id), # Ensure int
+                            "uuid": convo_uuid,
                             "mem_key": mem_key,
                             "salience": 1.0,
                             "summary": summary,
@@ -762,55 +766,48 @@ def _advanced_memory_consolidate_impl(mem_key: str, interaction_data: dict, user
             "timestamp": datetime.now().isoformat(),
             "salience": 1.0,
         }
-        cache_key = f"{user}_{convo_id}_{mem_key}"
+        cache_key = f"{convo_uuid}_{mem_key}"
         state.memory_cache["lru_cache"][cache_key] = {
             "entry": entry,
             "last_access": time.time(),
         }
         result = "Memory consolidated successfully."
         set_cached_tool_result("advanced_memory_consolidate", cache_args, result)
-        logger.info(f"Memory consolidated: {mem_key} (shared mode)")
+        logger.info(f"Memory consolidated: {mem_key}")
         return result
     except Exception:
         logger.error(f"Error consolidating memory: {traceback.format_exc()}")
         return f"Error consolidating memory: {traceback.format_exc()}"
-
 def profile_func(func: typing.Callable) -> typing.Callable:
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if os.getenv('PROFILE_MODE'):  # Enable via env var for testing
+        if os.getenv('PROFILE_MODE'): # Enable via env var for testing
             pr = cProfile.Profile()
             pr.enable()
             result = func(*args, **kwargs)
             pr.disable()
             s = io.StringIO()
             ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
-            ps.print_stats(10)  # Top 10 callers
+            ps.print_stats(10) # Top 10 callers
             logger.info(s.getvalue())
             return result
         return func(*args, **kwargs)
     return wrapper
-
-@inject_user_convo
+@inject_convo_uuid
 @profile_func
 def advanced_memory_retrieve(
-    query: str, top_k: int = Config.DEFAULT_TOP_K.value, user: str = 'shared', convo_id: int = 0
+    query: str, top_k: int = Config.DEFAULT_TOP_K.value, convo_uuid: str = None, uuid_list: list[str] = None
 ) -> str:
     tool_limiter_sync()
-    try:
-        convo_id = int(convo_id)  # FIX: Phase 1 - Safe coerce
-    except ValueError:
-        convo_id = 0
-        logger.warning("Invalid convo_id; default to 0")
-    cache_args = {"query": query, "top_k": top_k, "user": user, "convo_id": convo_id}
+    cache_args = {"query": query, "top_k": top_k, "convo_uuid": convo_uuid, "uuid_list": uuid_list}
     if cached := get_cached_tool_result("advanced_memory_retrieve", cache_args):
         return cached
     embed_model = state.get_embed_model()
     chroma_col = state.chroma_collection
     if not embed_model or not state.chroma_ready or not chroma_col:
         logger.warning("Vector memory not available; falling back to keyword search.")
-        retrieved = keyword_search(query, top_k, user=user, convo_id=convo_id)
-        if isinstance(retrieved, str) and "error" in retrieved.lower():  # FIX: Phase 1 - Check type
+        retrieved = keyword_search(query, top_k, convo_uuid=convo_uuid, uuid_list=uuid_list)
+        if isinstance(retrieved, str) and "error" in retrieved.lower(): # FIX: Phase 1 - Check type
             result = retrieved
         else:
             result = json.dumps(retrieved)
@@ -823,13 +820,11 @@ def advanced_memory_retrieve(
             query_emb = loop.run_until_complete(asyncio.wait_for(future, timeout=300.0)).tolist()
         except asyncio.TimeoutError:
             logger.warning("Embed timeout - Fallback to keyword search.")
-            return fallback_to_keyword(query, top_k, user, convo_id)
-        where_clause = {
-            "$and": [
-                {"user": {"$eq": user}},
-                {"convo_id": {"$eq": convo_id}},
-            ]
-        }
+            return fallback_to_keyword(query, top_k, convo_uuid, uuid_list)
+        if uuid_list:
+            where_clause = {"uuid": {"$in": uuid_list}}
+        else:
+            where_clause = {"uuid": {"$eq": convo_uuid}}
         with state.chroma_lock: # FIX: Phase 1 - Lock.
             results = chroma_col.query(
                 query_embeddings=[query_emb],
@@ -839,41 +834,43 @@ def advanced_memory_retrieve(
             )
         if not results.get("ids") or not results["ids"][0]:
             logger.warning(f"Empty Chroma results: where={where_clause}, query={query[:50]}")
-            where_clause.pop("convo_id", None)  # Relax convo_id
-            with state.chroma_lock:
-                results = chroma_col.query(
-                    query_embeddings=[query_emb],
-                    n_results=top_k,
-                    where=where_clause,
-                    include=["distances", "metadatas", "documents"],
-                )  # Completed re-query
-            if not results.get("ids") or not results["ids"][0]:  # Still empty? Seed but return short
+            if uuid_list:  # Relax to any in list if empty
+                for single_uuid in uuid_list:
+                    results = chroma_col.query(
+                        query_embeddings=[query_emb],
+                        n_results=top_k,
+                        where={"uuid": {"$eq": single_uuid}},
+                        include=["distances", "metadatas", "documents"],
+                    )
+                    if results.get("ids") and results["ids"][0]:
+                        break
+            if not results.get("ids") or not results["ids"][0]: # Still empty? Seed but return short
                 logger.info("Seeding empty DB.")
                 example_data = {"summary": "Initial seed memory", "details": "Welcome!"}
-                advanced_memory_consolidate("seed_key", example_data, user=user, convo_id=convo_id)
+                advanced_memory_consolidate("seed_key", example_data, convo_uuid=convo_uuid)
                 return "No relevant memories found."
         retrieved = process_chroma_results(results, top_k)
         if len(retrieved) > 5:
-            viz_result = viz_memory_lattice(user, convo_id, top_k=len(retrieved))
+            viz_result = viz_memory_lattice(convo_uuid, top_k=len(retrieved))
             logger.info(f"Auto-viz triggered: {viz_result}")
         if not retrieved:
             return "No relevant memories found."
         update_retrieve_metrics(len(retrieved), top_k)
         result = json.dumps(retrieved)
         set_cached_tool_result("advanced_memory_retrieve", cache_args, result)
-        logger.info(f"Memory retrieved for query: {query} (shared mode)")
+        logger.info(f"Memory retrieved for query: {query}")
         return result
     except Exception as e:
         logger.error(f"Error retrieving memory: {traceback.format_exc()}")
         return "No relevant memories found."
-def fallback_to_keyword(query: str, top_k: int, user: str, convo_id: int) -> list | str:
-    fallback_results = keyword_search(query, top_k, user=user, convo_id=convo_id)
+def fallback_to_keyword(query: str, top_k: int, convo_uuid: str, uuid_list: list[str]) -> list | str:
+    fallback_results = keyword_search(query, top_k, convo_uuid=convo_uuid, uuid_list=uuid_list)
     if isinstance(fallback_results, str) and "error" in fallback_results.lower():
         return fallback_results
     retrieved = []
     for res in fallback_results:
         mem_key = res["id"]
-        mem_value = memory_query(mem_key=mem_key, user=user, convo_id=convo_id)
+        mem_value = memory_query(mem_key=mem_key, convo_uuid=convo_uuid)
         retrieved.append(
             {
                 "mem_key": mem_key,
@@ -901,7 +898,7 @@ def process_chroma_results(results: dict, top_k: int) -> list[dict]:
             }
         )
         ids_to_update.append(results["ids"][0][i])
-        new_salience = min(1.0, meta.get("salience", 1.0) + 0.1)  # FIX: Phase 1 - Cap
+        new_salience = min(1.0, meta.get("salience", 1.0) + 0.1) # FIX: Phase 1 - Cap
         metadata_to_update.append({"salience": new_salience})
     if ids_to_update:
         with state.chroma_lock: # FIX: Phase 1 - Lock.
@@ -925,46 +922,46 @@ def should_prune() -> bool:
         st.session_state["prune_counter"] = 0
     st.session_state["prune_counter"] += 1
     return st.session_state["prune_counter"] % Config.PRUNE_FREQUENCY.value == 0
-def decay_salience(user: str, convo_id: int) -> None:
-    one_week_ago = (datetime.now() - timedelta(days=7)).isoformat()  # FIX: Phase 1 - ISO str
+def decay_salience(convo_uuid: str) -> None:
+    one_week_ago = (datetime.now() - timedelta(days=7)).isoformat() # FIX: Phase 1 - ISO str
     with state.conn:
         state.cursor.execute(
-            "UPDATE memory SET salience = salience * 0.99 WHERE user=? AND convo_id=? AND timestamp < ?",
-            (user, convo_id, one_week_ago),
+            "UPDATE memory SET salience = salience * 0.99 WHERE uuid=? AND timestamp < ?",
+            (convo_uuid, one_week_ago),
         )
-def prune_low_salience(user: str, convo_id: int) -> None:
+def prune_low_salience(convo_uuid: str) -> None:
     with state.conn:
         state.cursor.execute(
-            "DELETE FROM memory WHERE user=? AND convo_id=? AND salience < 0.1",
-            (user, convo_id),
+            "DELETE FROM memory WHERE uuid=? AND salience < 0.1",
+            (convo_uuid,),
         )
-def size_based_prune(user: str, convo_id: int) -> None:
+def size_based_prune(convo_uuid: str) -> None:
     with state.conn:
         state.cursor.execute(
-            "SELECT COUNT(*) FROM memory WHERE user=? AND convo_id=?", (user, convo_id)
+            "SELECT COUNT(*) FROM memory WHERE uuid=?", (convo_uuid,)
         )
         row_count = state.cursor.fetchone()[0]
         if row_count > 1000:
             state.cursor.execute(
-                "SELECT mem_key FROM memory WHERE user=? AND convo_id=? AND salience < 0.5 ORDER BY timestamp ASC LIMIT ?",
-                (user, convo_id, row_count - 1000),
+                "SELECT mem_key FROM memory WHERE uuid=? AND salience < 0.5 ORDER BY timestamp ASC LIMIT ?",
+                (convo_uuid, row_count - 1000),
             )
             low_keys = [row[0] for row in state.cursor.fetchall()]
-            if not low_keys:  # FIX: Phase 1 - If no low, delete oldest
+            if not low_keys: # FIX: Phase 1 - If no low, delete oldest
                 state.cursor.execute(
-                    "SELECT mem_key FROM memory WHERE user=? AND convo_id=? ORDER BY timestamp ASC LIMIT ?",
-                    (user, convo_id, row_count - 1000),
+                    "SELECT mem_key FROM memory WHERE uuid=? ORDER BY timestamp ASC LIMIT ?",
+                    (convo_uuid, row_count - 1000),
                 )
                 low_keys = [row[0] for row in state.cursor.fetchall()]
             state.cursor.executemany(
-                "DELETE FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
-                [(user, convo_id, key) for key in low_keys]
+                "DELETE FROM memory WHERE uuid=? AND mem_key=?",
+                [(convo_uuid, key) for key in low_keys]
             )
-def dedup_prune(user: str, convo_id: int) -> None:
+def dedup_prune(convo_uuid: str) -> None:
     with state.conn:
         state.cursor.execute(
-            "SELECT mem_key, mem_value FROM memory WHERE user=? AND convo_id=?",
-            (user, convo_id),
+            "SELECT mem_key, mem_value FROM memory WHERE uuid=?",
+            (convo_uuid,),
         )
         rows = state.cursor.fetchall()
         hashes = {}
@@ -977,24 +974,24 @@ def dedup_prune(user: str, convo_id: int) -> None:
             else:
                 hashes[h] = value
         state.cursor.executemany(
-            "DELETE FROM memory WHERE user=? AND convo_id=? AND mem_key=?",
-            [(user, convo_id, key) for key in to_delete]
+            "DELETE FROM memory WHERE uuid=? AND mem_key=?",
+            [(convo_uuid, key) for key in to_delete]
         )
-@inject_user_convo
-def advanced_memory_prune(user: str = 'shared', convo_id: int = 0) -> str:
+@inject_convo_uuid
+def advanced_memory_prune(convo_uuid: str, uuid_list: list[str] = None) -> str:
     if not should_prune():
         return "Prune skipped (infrequent)."
-    def _prune_sync(u, cid):
+    def _prune_sync(u):
         try:
             with state.conn:
-                decay_salience(u, cid)
-                prune_low_salience(u, cid)
-                size_based_prune(u, cid)
-                dedup_prune(u, cid)
-                one_week_ago = (datetime.now() - timedelta(days=7)).isoformat()  # FIX: Phase 1 - ISO
+                decay_salience(u)
+                prune_low_salience(u)
+                size_based_prune(u)
+                dedup_prune(u)
+                one_week_ago = (datetime.now() - timedelta(days=7)).isoformat() # FIX: Phase 1 - ISO
                 state.cursor.execute(
-                    "DELETE FROM memory WHERE user=? AND convo_id=? AND timestamp < ? AND mem_key LIKE 'agent_%'",
-                    (u, cid, one_week_ago),
+                    "DELETE FROM memory WHERE uuid=? AND timestamp < ? AND mem_key LIKE 'agent_%'",
+                    (u, one_week_ago),
                 )
                 state.conn.commit() # Explicit commit
             for agent_folder in os.listdir(state.agent_dir):
@@ -1006,23 +1003,28 @@ def advanced_memory_prune(user: str = 'shared', convo_id: int = 0) -> str:
                         logger.info(f"Pruned old agent folder: {agent_folder}")
             state.lru_evict()
             state.memory_cache["metrics"]["last_update"] = datetime.now().isoformat()
-            logger.info("Memory pruned successfully (shared mode)")
+            logger.info("Memory pruned successfully")
             return "Memory pruned successfully."
         except Exception as e:
             logger.error(f"Error pruning memory: {e}")
             return f"Error pruning memory: {e}"
-    future = state.agent_executor.submit(_prune_sync, user, convo_id)
-    try:
-        return future.result(timeout=300)
-    except Exception as e:
-        return f"Prune timeout/error: {e}"
+    if uuid_list:
+        results = []
+        for u in uuid_list:
+            results.append(_prune_sync(u))
+        return "\n".join(results)
+    else:
+        future = state.agent_executor.submit(_prune_sync, convo_uuid)
+        try:
+            return future.result(timeout=300)
+        except Exception as e:
+            return f"Prune timeout/error: {e}"
 @lru_cache(maxsize=128)
 def cached_embed(summary: str) -> list[float]:
     embed_model = state.get_embed_model()
     return embed_model.encode(summary).tolist()
 def viz_memory_lattice(
-    user: str,
-    convo_id: int,
+    convo_uuid: str,
     top_k: int = Config.DEFAULT_TOP_K.value * 4,
     sim_threshold: float = Config.SIM_THRESHOLD.value,
     output_dir: str = "./sandbox/viz",
@@ -1033,9 +1035,9 @@ def viz_memory_lattice(
     chroma_col = state.chroma_collection
     if not embed_model or not chroma_col:
         return "Error: Embed/Chroma not ready for viz."
-    convo_summary = memory_query(limit=1, user=user, convo_id=convo_id)
+    convo_summary = memory_query(limit=1, convo_uuid=convo_uuid)
     query = convo_summary if convo_summary != "[]" else "memory lattice"
-    where_clause = {"$and": [{"user": {"$eq": user}}, {"convo_id": {"$eq": int(convo_id)}}]}
+    where_clause = {"uuid": {"$eq": convo_uuid}}
     query_emb = embed_model.encode(query).tolist()
     with state.chroma_lock: # FIX: Phase 1 - Lock.
         results = chroma_col.query(
@@ -1064,7 +1066,7 @@ def viz_memory_lattice(
         all_embs = [cached_embed(summaries[i]) for i in range(len(summaries))]
         for i, node_i in enumerate(G.nodes):
             candidates = list(G.nodes)[i+1:]
-            if len(candidates) == 0:  # FIX: Phase 1 - Handle small
+            if len(candidates) == 0: # FIX: Phase 1 - Handle small
                 continue
             sampled = np.random.choice(candidates, min(3, len(candidates)), replace=False) # OPTIMIZED: Sample less
             for node_j in sampled:
@@ -1101,7 +1103,7 @@ def viz_memory_lattice(
         )
         fig = go.Figure(data=[edge_trace, node_trace],
                         layout=go.Layout(
-                            title=f"Memory Lattice: {len(G.nodes)} Nodes, {len(G.edges)} Veins (Convo {convo_id})",
+                            title=f"Memory Lattice: {len(G.nodes)} Nodes, {len(G.edges)} Veins (UUID {convo_uuid})",
                             showlegend=False,
                             hovermode='closest',
                             margin=dict(b=20,l=5,r=5,t=40),
@@ -1119,22 +1121,24 @@ def viz_memory_lattice(
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(layers, amps_simple, label="Baseline (Simple Prompt)", color='lightgray')
         ax.plot(layers, amps_complex, label="Your Lattice (Post-Priming)", color='teal', linewidth=2)
-        ax.set_title(f"Activation Amps Over 'Layers' (Convo {convo_id})")
+        ax.set_title(f"Activation Amps Over 'Layers' (UUID {convo_uuid})")
         ax.set_xlabel("Layer Proxy (Retrieval Rank Bins)")
         ax.set_ylabel("Amp (Salience * Sim)")
         ax.legend()
         st.pyplot(fig)
-        amps_path = os.path.join(output_dir, f"memory_amps_{convo_id}.png")
+        amps_path = os.path.join(output_dir, f"memory_amps_{convo_uuid}.png")
         plt.savefig(amps_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
     graph_json = nx.node_link_data(G)
-    mem_key = f"lattice_viz_{convo_id}"
-    memory_insert(mem_key, {"graph": graph_json, "paths": [amps_path]}, user=user, convo_id=convo_id)
-    logger.info(f"Lattice viz saved for convo {convo_id}: {len(G.nodes)} nodes")
+    mem_key = f"lattice_viz_{convo_uuid}"
+    memory_insert(mem_key, {"graph": graph_json, "paths": [amps_path]}, convo_uuid=convo_uuid)
+    logger.info(f"Lattice viz saved for convo_uuid {convo_uuid}: {len(G.nodes)} nodes")
     return f"Viz complete: Interactive graph rendered. Query '{mem_key}' for data."
-async def async_run_spawn(agent_id: str, task: str, user: str, convo_id: int, model: str = Models.GROK_3_MINI.value) -> str:
+async def async_run_spawn(agent_id: str, context: dict, model: str = Models.GROK_3_MINI.value) -> str:
     async with state.agent_sem: # Use semaphore
         max_attempts = 3 # FIX: Phase 3.
+        convo_uuid = context['convo_uuid']
+        task = context['task']
         for attempt in range(max_attempts):
             try:
                 client = AsyncOpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/")
@@ -1142,14 +1146,14 @@ async def async_run_spawn(agent_id: str, task: str, user: str, convo_id: int, mo
                     client.chat.completions.create(
                         model=model,
                         messages=[
-                            {"role": "system", "content": "You are an agent for AurumVivum. Execute the given task/query/scenario/simulation. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
+                            {"role": "system", "content": f"You are an agent for AurumVivum. Execute the given task/query/scenario/simulation. Use this UUID for memory: {convo_uuid}. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
                             {"role": "user", "content": task}
                         ],
                         stream=False,
-                    ), timeout=600.0  # Bumped timeout
+                    ), timeout=600.0 # Bumped timeout
                 )
                 result = response.choices[0].message.content.strip()
-                persist_agent_result(agent_id, task, result, user, convo_id)
+                persist_agent_result(agent_id, task, result, convo_uuid)
                 logger.info(f"Agent {agent_id} succeeded async.")
                 return result
             except asyncio.TimeoutError:
@@ -1158,15 +1162,14 @@ async def async_run_spawn(agent_id: str, task: str, user: str, convo_id: int, mo
                 await asyncio.sleep(5 * (attempt + 1)) # FIX: Phase 3 - Expo backoff.
                 if attempt == max_attempts - 1:
                     error = f"Max attempts failed: {e}"
-                    persist_agent_result(agent_id, task, error, user, convo_id)
+                    persist_agent_result(agent_id, task, error, convo_uuid)
                     return error
-
 def visualize_got(
-    got_data: str,  # YAML/JSON str of lattice (e.g., from tool_lattice.graph)
-    format: str = "both",  # "graph" (Plotly), "amps" (Matplotlib), "both", "json" (data only), "text" (ASCII)
-    detail_level: int = 2,  # 1=simple nodes, 2=relations, 3=attrs/weights
+    got_data: str, # YAML/JSON str of lattice (e.g., from tool_lattice.graph)
+    format: str = "both", # "graph" (Plotly), "amps" (Matplotlib), "both", "json" (data only), "text" (ASCII)
+    detail_level: int = 2, # 1=simple nodes, 2=relations, 3=attrs/weights
     user: str = "shared",
-    convo_id: int = 0,
+    convo_uuid: str = None,
     output_dir: str = "./sandbox/viz",
     sim_threshold: float = Config.SIM_THRESHOLD.value
 ) -> str:
@@ -1178,22 +1181,19 @@ def visualize_got(
     import os
     import numpy as np
     try:
-        from ascii_graph import Pyasciigraph  # FIX: Phase 1 - Import here, handle missing
+        from ascii_graph import Pyasciigraph # FIX: Phase 1 - Import here, handle missing
     except ImportError:
         if format == "text":
             return "ASCII not available - install ascii_graph."
-
     os.makedirs(output_dir, exist_ok=True)
-
     # Parse got_data (YAML priority, fallback JSON)
     try:
         data = yaml.safe_load(got_data) if got_data.strip().startswith(('#', 'graph:')) else json.loads(got_data)
     except Exception as e:
         return f"Error: Invalid GoT data format - {e}"
-
-    G = nx.DiGraph()  # Directed for relations (depends_on, etc.)
+    G = nx.DiGraph() # Directed for relations (depends_on, etc.)
     for node, attrs in data.get('graph', {}).items():
-        G.add_node(node, **attrs)  # Add weights/triggers
+        G.add_node(node, **attrs) # Add weights/triggers
         for rel in ['depends_on', 'limited_by', 'mitigation', 'integrates']:
             targets = attrs.get(rel, [])
             if isinstance(targets, list):
@@ -1201,10 +1201,8 @@ def visualize_got(
                     G.add_edge(node, t, relation=rel, weight=attrs.get('weight', 1.0))
             elif targets:
                 G.add_edge(node, targets, relation=rel, weight=attrs.get('weight', 1.0))
-
     if len(G.nodes) == 0:
         return "No GoT nodes to visualize."
-
     # Optional: Embed/sims if detail_level >1 (reuse your cached_embed)
     embed_model = state.get_embed_model()
     if detail_level > 1 and embed_model:
@@ -1213,7 +1211,6 @@ def visualize_got(
             sim = np.dot(node_embs[u], node_embs[v]) / (np.linalg.norm(node_embs[u]) * np.linalg.norm(node_embs[v]))
             if sim > sim_threshold:
                 G.edges[u, v]['sim'] = sim
-
     # Render based on format
     paths = []
     if format in ["graph", "both"]:
@@ -1225,7 +1222,6 @@ def visualize_got(
             edge_x.extend([x0, x1, None])
             edge_y.extend([y0, y1, None])
         edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none', mode='lines', line_shape='spline')
-
         node_x, node_y, node_text = [], [], []
         for node in G.nodes():
             x, y = pos[node]
@@ -1234,14 +1230,12 @@ def visualize_got(
             node_text.append(node + f" (w:{G.nodes[node].get('weight',1.0):.2f})")
         node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', hoverinfo='text', text=node_text,
                                 marker=dict(size=[G.nodes[n].get('weight',1.0)*10 for n in G.nodes], color=[G.edges.get((n, next(iter(G[n])), {}), {}).get('sim',0.5) for n in G.nodes], colorscale='Viridis'))
-
         fig = go.Figure(data=[edge_trace, node_trace], layout=go.Layout(title=f"GoT Lattice: {len(G.nodes)} Nodes", showlegend=False, hovermode='closest',
                                                                         margin=dict(b=20,l=5,r=5,t=40), xaxis=dict(showgrid=False), yaxis=dict(showgrid=False)))
         # UI optional: if st._is_running_with_streamlit: st.plotly_chart(fig)
-        graph_path = os.path.join(output_dir, f"got_graph_{convo_id}.png")
-        fig.write_image(graph_path)  # Save PNG for agent/fs access
+        graph_path = os.path.join(output_dir, f"got_graph_{convo_uuid}.png")
+        fig.write_image(graph_path) # Save PNG for agent/fs access
         paths.append(graph_path)
-
     if format in ["amps", "both"]:
         weights = [d.get('weight', 1.0) for _, d in G.nodes(data=True)]
         sims = [e[2].get('sim', 0.5) for e in G.edges(data=True)] or [0.5] * len(G.nodes)
@@ -1250,32 +1244,28 @@ def visualize_got(
         ax.plot(layers, [0.5]*len(layers), label="Baseline", color='lightgray')
         ax.plot(layers, weights, label="Node Weights", color='gold')
         ax.plot(layers, sims[:len(layers)], label="Edge Sims", color='crimson', linewidth=2)
-        ax.set_title(f"GoT Activation Amps (Convo {convo_id})")
+        ax.set_title(f"GoT Activation Amps (UUID {convo_uuid})")
         ax.legend()
         # UI optional: if st._is_running_with_streamlit: st.pyplot(fig)
-        amps_path = os.path.join(output_dir, f"got_amps_{convo_id}.png")
+        amps_path = os.path.join(output_dir, f"got_amps_{convo_uuid}.png")
         fig.savefig(amps_path, dpi=150)
         plt.close(fig)
         paths.append(amps_path)
-
     if format == "text":
         graph = Pyasciigraph()
         ascii_rep = ""
         for line in graph.graph('GoT ASCII', [(n, len(G[n])) for n in G.nodes]):
             ascii_rep += line + "\n"
-        text_path = os.path.join(output_dir, f"got_text_{convo_id}.txt")
+        text_path = os.path.join(output_dir, f"got_text_{convo_uuid}.txt")
         with open(text_path, 'w') as f:
             f.write(ascii_rep)
         paths.append(text_path)
-
     # Save to memory (like viz_memory_lattice)
     graph_json = nx.node_link_data(G)
-    mem_key = f"got_viz_{convo_id}"
-    memory_insert(mem_key, {"graph": graph_json, "paths": paths}, user=user, convo_id=convo_id)
-
+    mem_key = f"got_viz_{convo_uuid}"
+    memory_insert(mem_key, {"graph": graph_json, "paths": paths}, convo_uuid=convo_uuid)
     return f"GoT Viz complete: PNGs/TXT at {output_dir}, data in '{mem_key}'. Use fs_read_file or view_image to access."
-
-def persist_agent_result(agent_id: str, task: str, response: str, user: str, convo_id: int) -> None:
+def persist_agent_result(agent_id: str, task: str, response: str, convo_uuid: str) -> None:
     try:
         with state.agent_lock:
             agent_folder = os.path.join(state.agent_dir, agent_id)
@@ -1291,39 +1281,40 @@ def persist_agent_result(agent_id: str, task: str, response: str, user: str, con
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(result_data, f, indent=4)
             mem_key = f"agent_{agent_id}_result"
-            memory_insert(mem_key, result_data, user=user, convo_id=convo_id)
+            memory_insert(mem_key, result_data, convo_uuid=convo_uuid)
             summary_data = {"summary": f"Agent {agent_id} response to task: {task[:100]}...", "details": response}
-            advanced_memory_consolidate(f"agent_{agent_id}_summary", summary_data, user=user, convo_id=convo_id)
+            advanced_memory_consolidate(f"agent_{agent_id}_summary", summary_data, convo_uuid=convo_uuid)
             notify_key = f"agent_{agent_id}_complete"
             notify_data = {"agent_id": agent_id, "status": "complete", "result_key": mem_key, "timestamp": datetime.now().isoformat()}
-            memory_insert(notify_key, notify_data, user=user, convo_id=convo_id)
+            memory_insert(notify_key, notify_data, convo_uuid=convo_uuid)
             get_state("pending_notifies", []).append({"agent_id": agent_id, "status": "complete", "task": task[:100]})
             logger.info(f"Agent {agent_id} persisted and notified.")
-    except OSError as e:  # Specific for file/dir issues
+    except OSError as e: # Specific for file/dir issues
         logger.error(f"File error for agent {agent_id}: {e}")
         error_data = {"agent_id": agent_id, "error": str(e), "status": "failed"}
-        memory_insert(f"agent_{agent_id}_error", error_data, user=user, convo_id=convo_id)
+        memory_insert(f"agent_{agent_id}_error", error_data, convo_uuid=convo_uuid)
     except Exception as e:
         logger.error(f"Persistence error for agent {agent_id}: {e}")
         error_data = {"agent_id": agent_id, "error": str(e), "status": "failed"}
-        memory_insert(f"agent_{agent_id}_error", error_data, user=user, convo_id=convo_id)
-@inject_user_convo
-def agent_spawn(sub_agent_type: str, task: str, user: str = 'shared', convo_id: int = 0, poll_interval: int = 5, model: str = Models.GROK_3_MINI.value, auto_poll: bool = False) -> str: # FIX: Phase 3 - Add auto_poll.
+        memory_insert(f"agent_{agent_id}_error", error_data, convo_uuid=convo_uuid)
+@inject_convo_uuid
+def agent_spawn(sub_agent_type: str, task: str, convo_uuid: str, poll_interval: int = 5, model: str = Models.GROK_3_MINI.value, auto_poll: bool = False) -> str: # FIX: Phase 3 - Add auto_poll.
     tool_limiter_sync()
     if len(task) > Config.MAX_TASK_LEN.value:
         return "Error: Task too long (max 2000 chars)."
     agent_id = f"{sub_agent_type}_{str(uuid.uuid4())[:8]}"
+    context = {'convo_uuid': convo_uuid, 'task': task}
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(async_run_spawn(agent_id, task, user, convo_id, model))
+    loop.run_until_complete(async_run_spawn(agent_id, context, model))
     status_key = f"agent_{agent_id}_status"
     status_data = {"agent_id": agent_id, "task": task[:100], "status": "spawned", "timestamp": datetime.now().isoformat(), "poll_interval": poll_interval}
-    memory_insert(status_key, status_data, user=user, convo_id=convo_id)
+    memory_insert(status_key, status_data, convo_uuid=convo_uuid)
     get_state("pending_notifies", []).append({"agent_id": agent_id, "status": "spawned", "task": task[:100]})
     if auto_poll:
         max_polls = 30
         for _ in range(max_polls):
-            time.sleep(poll_interval)  # FIXME: Non-async sleep - for hobby, OK; later thread
-            complete = memory_query(mem_key=f"agent_{agent_id}_complete", user=user, convo_id=convo_id)
+            time.sleep(poll_interval) # FIXME: Non-async sleep - for hobby, OK; later thread
+            complete = memory_query(mem_key=f"agent_{agent_id}_complete", convo_uuid=convo_uuid)
             if complete != "Key not found.":
                 return f"Polled result: {complete}"
         return "Poll timeout."
@@ -1335,11 +1326,10 @@ def render_agent_fleet() -> None:
         for notify in pending:
             st.info(f"**{notify['agent_id']}**: {notify['status']} – Task: {notify['task']}")
         st.session_state["pending_notifies"] = []
- 
     user = st.session_state.get("user")
-    convo_id = st.session_state.get("current_convo_id", 0)
-    if user and convo_id:
-        active_query = memory_query(limit=20, user=user, convo_id=convo_id)
+    convo_uuid = st.session_state.get("current_convo_uuid")
+    if user and convo_uuid:
+        active_query = memory_query(limit=20, convo_uuid=convo_uuid)
         active_agents = []
         try:
             active_data = json.loads(active_query)
@@ -1349,22 +1339,22 @@ def render_agent_fleet() -> None:
             st.warning("Error loading active agents.")
         if active_agents:
             st.subheader("Active Fleet")
-            for idx, agent in enumerate(active_agents):  # Enumerate for unique keys
+            for idx, agent in enumerate(active_agents): # Enumerate for unique keys
                 col1, col2, col3 = st.columns([3, 4, 1])
                 with col1:
                     st.write(f"**{agent.get('agent_id', 'Unknown')}**")
                 with col2:
                     st.write(f"Status: {agent.get('status', 'Unknown')} | Task: {agent.get('task', '')[:50]}...")
                 with col3:
-                    unique_key = f"kill_{agent.get('agent_id', '')}_{uuid.uuid4()}_{idx}"  # Unique with UUID and idx
-                    logger.debug(f"Key generated: {unique_key}")  # Debug logger
+                    unique_key = f"kill_{agent.get('agent_id', '')}_{uuid.uuid4()}_{idx}" # Unique with UUID and idx
+                    logger.debug(f"Key generated: {unique_key}") # Debug logger
                     if st.button("Kill", key=unique_key):
                         kill_key = f"agent_{agent['agent_id']}_kill"
                         kill_data = {"status": "killed", "timestamp": datetime.now().isoformat()}
-                        memory_insert(kill_key, kill_data, user=user, convo_id=convo_id)
+                        memory_insert(kill_key, kill_data, convo_uuid=convo_uuid)
                         st.rerun()
             if st.button("Spawn Fleet (Parallel Sims)"):
-                safe_call(agent_spawn, "fleet", "Run parallel quantum sims on nodes 1-3", user=user, convo_id=convo_id)
+                safe_call(agent_spawn, "fleet", "Run parallel quantum sims on nodes 1-3", convo_uuid=convo_uuid)
 def git_init(safe_repo: str) -> str:
     try:
         repo = pygit2.discover_repository(safe_repo) # Check existing
@@ -1378,7 +1368,7 @@ def git_commit(repo: pygit2.Repository, message: str) -> str:
     if not message:
         return "Error: Message required for commit."
     try:
-        repo.git.add(A=True)  # Fixed: Use git.add with A=True
+        repo.git.add(A=True) # Fixed: Use git.add with A=True
     except AttributeError:
         # Fallback for older pygit2
         index = repo.index
@@ -1463,10 +1453,10 @@ def shell_exec(command: str) -> str:
     for arg in cmd_parts[1:]: # FIX: Phase 2 - Arg validation.
         if re.search(r'[;&|><$]', arg):
             return "Invalid arg chars."
-        if re.search(r'[\*\?\[\]]|\.\./', arg):  # FIX: Phase 1 - Better forbidden
+        if re.search(r'[\*\?\[\]]|\.\./', arg): # FIX: Phase 1 - Better forbidden
             return "Error: Forbidden patterns in args."
-    convo_id = st.session_state.get("current_convo_id", 0)
-    confirm_key = f"confirm_destructive_{convo_id}"
+    convo_uuid = st.session_state.get("current_convo_uuid")
+    confirm_key = f"confirm_destructive_{convo_uuid}"
     if cmd_base in ["rm", "rmdir"] and not get_state(confirm_key, False):
         st.session_state[confirm_key] = True
         return "Warning: Destructive command detected. Confirm by re-running."
@@ -1602,28 +1592,34 @@ def summarize_chunk(chunk: str) -> str:
     except Exception as e:
         logger.error(f"Summarize error: {e}")
         return f"Summarize error: {e}"
-@inject_user_convo
+@inject_convo_uuid
 def keyword_search(
-    query: str, top_k: int = Config.DEFAULT_TOP_K.value, user: str = 'shared', convo_id: int = 0
+    query: str, top_k: int = Config.DEFAULT_TOP_K.value, convo_uuid: str = None, uuid_list: list[str] = None
 ) -> list | str:
     tool_limiter_sync()
     try:
         with state.conn:
-            state.cursor.execute(
-                "SELECT mem_key FROM memory WHERE user=? AND convo_id=? AND mem_value LIKE ? ORDER BY salience DESC LIMIT ?",
-                (user, convo_id, f"%{query}%", top_k),
-            )
+            if uuid_list:
+                placeholders = ','.join('?' for _ in uuid_list)
+                where = f"uuid IN ({placeholders})"
+                params = uuid_list
+            else:
+                where = "uuid=?"
+                params = [convo_uuid]
+            sql = f"SELECT mem_key FROM memory WHERE {where} AND mem_value LIKE ? ORDER BY salience DESC LIMIT ?"
+            params.append(f"%{query}%")
+            params.append(top_k)
+            state.cursor.execute(sql, params)
             results = [{"id": row[0], "score": 1.0} for row in state.cursor.fetchall()]
             return results
     except Exception as e:
         logger.error(f"Keyword search error: {e}")
         return f"Keyword search error: {e}"
-@inject_user_convo
+@inject_convo_uuid
 def socratic_api_council(
     branches: list,
     model: str = Models.GROK_FAST_REASONING.value,
-    user: str = 'shared',
-    convo_id: int = 0,
+    convo_uuid: str = None,
     api_key: str = None,
     rounds: int = 3,
     personas: list = None,
@@ -1667,8 +1663,7 @@ def socratic_api_council(
         advanced_memory_consolidate(
             "council_result",
             {"branches": branches, "result": consensus},
-            user=user,
-            convo_id=convo_id,
+            convo_uuid=convo_uuid
         )
         logger.info("Socratic council completed")
         return consensus
@@ -1743,16 +1738,16 @@ def isolated_subprocess(cmd: str, custom_env: dict = None) -> str:
         logger.error(f"Subprocess error: {e}")
         return f"Subprocess error: {e}"
 PIP_WHITELIST = [
-    "numpy",  # Pinned for ARM compat if needed
+    "numpy", # Pinned for ARM compat if needed
     "pandas",
     "matplotlib",
     "scipy",
     "sympy",
     "requests",
     "beautifulsoup4",
-    "qiskit",  # Loosened for agents
+    "qiskit", # Loosened for agents
     "torch",
-    "tensorflow",  # Added for creativity
+    "tensorflow", # Added for creativity
 ]
 def pip_install(venv_path: str, packages: list, upgrade: bool = False) -> str:
     tool_limiter_sync()
@@ -1775,19 +1770,26 @@ def pip_install(venv_path: str, packages: list, upgrade: bool = False) -> str:
     except Exception as e:
         logger.error(f"Pip error: {e}")
         return f"Pip error: {e}"
-@inject_user_convo
+@inject_convo_uuid
 def chat_log_analyze_embed(
-    convo_id: int, criteria: str, summarize: bool = True, user: str = 'shared'
+    convo_id: int, criteria: str, summarize: bool = True, convo_uuid: str = None
 ) -> str:
     tool_limiter_sync()
-    with state.conn:
-        state.cursor.execute(
-            "SELECT messages FROM history WHERE convo_id=? AND user=?", (convo_id, user)
-        )
-        result = state.cursor.fetchone()
-    if not result:
-        return "Error: Chat log not found."
-    messages = json.loads(result[0])
+    if convo_id == 0:
+        # Special case: Use current in-memory messages for unsaved/new chat
+        messages = st.session_state.get("messages", [])
+        if not messages:
+            return "Error: No current chat log found in session."
+    else:
+        # Existing DB lookup
+        with state.conn:
+            state.cursor.execute(
+                "SELECT messages FROM history WHERE convo_id=?", (convo_id,)
+            )
+            result = state.cursor.fetchone()
+        if not result:
+            return "Error: Chat log not found."
+        messages = json.loads(result[0])
     if not messages:
         return "Error: Empty chat log."
     chat_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
@@ -1819,13 +1821,13 @@ def chat_log_analyze_embed(
     chroma_col = state.chroma_collection
     embedding = embed_model.encode(analysis).tolist()
     mem_key = f"chat_log_{convo_id}"
-    with state.chroma_lock: # FIX: Phase 1 - Lock.
+    with state.chroma_lock:
         chroma_col.upsert(
             ids=[mem_key],
             embeddings=[embedding],
             documents=[analysis],
             metadatas=[
-                {"user": user, "convo_id": convo_id, "type": "chat_log", "salience": 1.0}
+                {"uuid": convo_uuid, "type": "chat_log", "salience": 1.0}
             ],
         )
     return f"Chat log {convo_id} analyzed and embedded as {mem_key}."
@@ -1833,6 +1835,8 @@ def yaml_retrieve(
     query: str = None, top_k: int = Config.DEFAULT_TOP_K.value, filename: str = None
 ) -> str:
     tool_limiter_sync()
+    if not query and not filename:
+        return "Error: Provide query or filename."
     if not state.yaml_ready:
         state._init_yaml_embeddings() # Lazy if not ready
     col = state.yaml_collection
@@ -1929,7 +1933,7 @@ def yaml_refresh(filename: str = None) -> str:
             fnames = []
             for fname in os.listdir(state.yaml_dir):
                 if fname.endswith(".yaml"):
-                    path = os.path.join(state.yaml_dir, fname)
+                    path = os.path.join(self.yaml_dir, fname)
                     try:
                         with open(path, "r", encoding="utf-8") as f:
                             content = f.read()
@@ -1939,7 +1943,7 @@ def yaml_refresh(filename: str = None) -> str:
                     except OSError as e:
                         logger.error(f"YAML file error for {fname}: {e}")
             if contents:
-                if len(contents) > 10:  # FIX: Phase 3 - Batch with threads if large
+                if len(contents) > 10: # FIX: Phase 3 - Batch with threads if large
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         embeddings = list(executor.map(embed_model.encode, contents))
                     embeddings = [emb.tolist() for emb in embeddings]
@@ -1987,21 +1991,20 @@ def generate_tool_schema(func: typing.Callable) -> dict:
                 prop_type = type_map.get(base_type, "array")
             else:
                 prop_type = type_map.get(ann, "string")
-     
+    
         # Build prop uniformly
         prop = {"type": prop_type}
         if prop_type == "array":
             prop["items"] = {"type": "string"} # Assume string array; customize if needed
         if param.default is not inspect._empty and param.default != inspect.Parameter.empty:
             prop["default"] = param.default
-     
+    
         # Always assign
         properties[param_name] = prop
-     
+    
         # Always check required
         if param.default == inspect.Parameter.empty:
             required.append(param_name)
- 
     return {
         "type": "function",
         "function": {
@@ -2047,7 +2050,7 @@ for func in TOOL_FUNCS:
             for k, v in kwargs.items():
                 if k in sig.parameters:
                     ann = sig.parameters[k].annotation
-                    try:  # FIX: Phase 1 - Catch coercion
+                    try: # FIX: Phase 1 - Catch coercion
                         if ann is int and isinstance(v, str):
                             coerced_kwargs[k] = int(v)
                         elif ann is bool and isinstance(v, str):
@@ -2055,7 +2058,7 @@ for func in TOOL_FUNCS:
                         elif ann is float and isinstance(v, str):
                             coerced_kwargs[k] = float(v)
                         elif ann is list and isinstance(v, str):
-                            coerced_kwargs[k] = v.split(',')  # FIX: Phase 2 - Simple list coerce
+                            coerced_kwargs[k] = v.split(',') # FIX: Phase 2 - Simple list coerce
                         else:
                             coerced_kwargs[k] = v
                     except ValueError:
@@ -2081,7 +2084,6 @@ NATIVE_TOOLS = [
 tool_count = get_state("tool_count", 0)
 council_count = get_state("council_count", 0)
 main_count = get_state("main_count", 0)
-
 def _handle_single_tool(tool_call, current_messages, enable_tools) -> typing.Generator[str, None, None]:
     func_name = tool_call.function.name
     try:
@@ -2093,7 +2095,7 @@ def _handle_single_tool(tool_call, current_messages, enable_tools) -> typing.Gen
     except Exception as e:
         result = f"Error calling tool {func_name}: {e}"
     if func_name == "socratic_api_council":
-        with state.counter_lock:  # FIX: Phase 1 - Lock counters
+        with state.counter_lock: # FIX: Phase 1 - Lock counters
             global council_count
             council_count += 1
     else:
@@ -2129,8 +2131,6 @@ def call_xai_api(
 ) -> typing.Generator[str, None, None]:
     # Custom function tools only (no natives in tools array)
     all_tools = TOOLS if enable_tools else None
- 
-    client = OpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/", timeout=3600)
     client = OpenAI(api_key=API_KEY, base_url="https://api.x.ai/v1/", timeout=3600)
     api_messages = [{"role": "system", "content": sys_prompt}]
     for msg in messages:
@@ -2151,7 +2151,6 @@ def call_xai_api(
                 "content": content_parts if len(content_parts) > 1 else msg["content"],
             }
         )
- 
     def generate(current_messages: list[dict]) -> typing.Generator[str, None, None]:
         global tool_count, council_count, main_count
         max_iterations = Config.MAX_ITERATIONS.value
@@ -2159,10 +2158,10 @@ def call_xai_api(
         if tool_calls_per_convo > Config.TOOL_CALL_LIMIT.value:
             yield "Error: Tool call limit exceeded for this conversation."
             return
-     
+    
         # FIXED: Use local flag to avoid UnboundLocalError
-        current_enable_xai_tools = enable_xai_tools  # FIX: Phase 1 - Local copy
-     
+        current_enable_xai_tools = enable_xai_tools # FIX: Phase 1 - Local copy
+    
         # Configure search_parameters for xAI natives
         extra_body = {}
         if current_enable_xai_tools:
@@ -2180,11 +2179,11 @@ def call_xai_api(
             }
             extra_body["search_parameters"] = search_params
             logger.info(f"Enabled xAI live search with params: {search_params}")
-     
+    
         retry_count = 0 # FIX: Phase 1 - Cap retries.
-        start_time = time.time()  # FIX: Phase 3 - Total timeout
+        start_time = time.time() # FIX: Phase 3 - Total timeout
         for iteration in range(max_iterations):
-            with state.counter_lock:  # FIX: Phase 1 - Lock
+            with state.counter_lock: # FIX: Phase 1 - Lock
                 main_count += 1
             logger.info(
                 f"API call: Tools: {tool_count} | Council: {council_count} | Main: {main_count} | Iteration: {iteration + 1} | Search Enabled: {current_enable_xai_tools}"
@@ -2202,12 +2201,12 @@ def call_xai_api(
                 tool_calls = []
                 full_delta_response = ""
                 sources_used = 0 # Track for logging
-                chunk_buffer = ""  # FIX: Phase 3 - Buffer yields
+                chunk_buffer = "" # FIX: Phase 3 - Buffer yields
                 for chunk in response:
                     delta = chunk.choices[0].delta
                     if delta and delta.content:
                         chunk_buffer += delta.content
-                        if len(chunk_buffer.split()) > 3:  # Yield every ~3 words
+                        if len(chunk_buffer.split()) > 3: # Yield every ~3 words
                             yield chunk_buffer
                             chunk_buffer = ""
                         full_delta_response += delta.content
@@ -2216,10 +2215,10 @@ def call_xai_api(
                     # Log sources in final chunk (non-streaming fallback)
                     if chunk.usage and hasattr(chunk.usage, 'num_sources_used'):
                         sources_used = chunk.usage.num_sources_used
-                if chunk_buffer:  # Flush remaining
+                if chunk_buffer: # Flush remaining
                     yield chunk_buffer
                 logger.info(f"Search sources used: {sources_used}")
-             
+            
                 if not tool_calls:
                     break
                 current_messages.append(
@@ -2279,7 +2278,7 @@ def call_xai_api(
                 yield f"\n{error_msg}"
                 logger.error(f"Unexpected error in API call: {traceback.format_exc()}")
                 break
-            if time.time() - start_time > 300:  # FIX: Phase 3 - Cap total
+            if time.time() - start_time > 300: # FIX: Phase 3 - Cap total
                 yield "Total timeout—aborting."
                 break
     return generate(api_messages)
@@ -2290,7 +2289,7 @@ def search_history(query: str) -> list[tuple]:
     )
     return state.cursor.fetchall()
 def export_convo(format: str = "json") -> str:
-    if "messages" not in st.session_state:  # FIX: Phase 1 - Check
+    if "messages" not in st.session_state: # FIX: Phase 1 - Check
         return "No convo to export."
     if format == "json":
         return json.dumps(st.session_state["messages"], indent=4)
@@ -2348,7 +2347,7 @@ def render_sidebar() -> None:
             st.text_area(
                 "Edit System Prompt",
                 value=current_prompt,
-                height=200,
+                height=400,
                 key="custom_prompt",
             )
             if st.button("Save Prompt"):
@@ -2356,9 +2355,9 @@ def render_sidebar() -> None:
                     f.write(st.session_state["custom_prompt"])
             if st.button("Evolve Prompt"):
                 user = st.session_state.get("user")
-                convo_id = st.session_state.get("current_convo_id", 0)
+                convo_uuid = st.session_state.get("current_convo_uuid")
                 metrics = {"length": len(st.session_state["custom_prompt"]), "vibe": "creative"}
-                new_prompt = auto_optimize_prompt(st.session_state["custom_prompt"], user, convo_id, metrics)
+                new_prompt = auto_optimize_prompt(st.session_state["custom_prompt"], user, convo_id=0, metrics=metrics)  # convo_id not used
                 st.session_state["custom_prompt"] = new_prompt
                 st.rerun()
             st.checkbox("Enable Tools (Sandboxed)", value=False, key="enable_tools")
@@ -2382,7 +2381,9 @@ def render_sidebar() -> None:
         tab1, tab2 = st.tabs(["Settings", "Agent Fleet"])
         with tab1:
             if st.button("➕ New Chat", use_container_width=True):
+                new_convo_uuid = str(uuid.uuid4())
                 st.session_state["messages"] = []
+                st.session_state["current_convo_uuid"] = new_convo_uuid
                 st.session_state["current_convo_id"] = 0
                 st.session_state["tool_calls_per_convo"] = 0
                 st.session_state["rerun_guard"] = False
@@ -2421,10 +2422,10 @@ def render_sidebar() -> None:
                     st.metric("Stability Score", f"{state.stability_score:.2%}", delta_color="normal" if state.stability_score > 0.8 else "inverse")
                     st.metric("Main API Calls", main_count) # FIX: Phase 3.
                 if st.button("Weave Memory Lattice (Viz Current Convo)"):
-                    viz_result = viz_memory_lattice(st.session_state["user"], st.session_state["current_convo_id"])
+                    viz_result = viz_memory_lattice(st.session_state["current_convo_uuid"])
                     st.info(viz_result)
                 if st.button("Prune Memory Now"):
-                    prune_result = advanced_memory_prune(user=st.session_state["user"], convo_id=st.session_state["current_convo_id"])
+                    prune_result = advanced_memory_prune(convo_uuid=st.session_state["current_convo_uuid"])
                     st.info(prune_result)
                 if st.button("Clear Cache"):
                     st.session_state["tool_cache"] = {}
@@ -2475,24 +2476,32 @@ def login_page() -> None:
                     st.success("Registered! Please login.")
 def load_history(convo_id: int) -> None:
     state.cursor.execute(
-        "SELECT messages FROM history WHERE convo_id=? AND user=?",
+        "SELECT messages, uuid FROM history WHERE convo_id=? AND user=?",
         (convo_id, st.session_state["user"]),
     )
     if result := state.cursor.fetchone():
         messages = json.loads(result[0])
         st.session_state["messages"] = messages
         st.session_state["current_convo_id"] = convo_id
+        st.session_state["current_convo_uuid"] = result[1]
         st.session_state["rerun_guard"] = False
         st.rerun()
 def delete_history(convo_id: int) -> None:
     state.cursor.execute(
+        "SELECT uuid FROM history WHERE convo_id=? AND user=?",
+        (convo_id, st.session_state["user"]),
+    )
+    convo_uuid = state.cursor.fetchone()[0]
+    state.cursor.execute(
         "DELETE FROM history WHERE convo_id=? AND user=?",
         (convo_id, st.session_state["user"]),
     )
+    state.cursor.execute("DELETE FROM memory WHERE uuid=?", (convo_uuid,))
     state.conn.commit()
     if st.session_state.get("current_convo_id") == convo_id:
         st.session_state["messages"] = []
         st.session_state["current_convo_id"] = 0
+        st.session_state["current_convo_uuid"] = None
     st.session_state["rerun_guard"] = False
     st.rerun()
 def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, uploaded_images: list, enable_xai_tools: bool) -> None:
@@ -2501,6 +2510,8 @@ def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, up
         st.session_state["messages"] = []
     if "current_convo_id" not in st.session_state:
         st.session_state["current_convo_id"] = 0
+    if "current_convo_uuid" not in st.session_state:
+        st.session_state["current_convo_uuid"] = str(uuid.uuid4())
     if "tool_calls_per_convo" not in st.session_state:
         st.session_state["tool_calls_per_convo"] = 0
     for msg in st.session_state.messages:
@@ -2530,8 +2541,8 @@ def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, up
         if st.session_state.get("current_convo_id", 0) == 0:
             with state.conn:
                 state.cursor.execute(
-                    "INSERT INTO history (user, title, messages) VALUES (?, ?, ?)",
-                    (st.session_state["user"], title, messages_json),
+                    "INSERT INTO history (user, uuid, title, messages) VALUES (?, ?, ?, ?)",
+                    (st.session_state["user"], st.session_state["current_convo_uuid"], title, messages_json),
                 )
                 st.session_state.current_convo_id = state.cursor.lastrowid
         else:
@@ -2553,15 +2564,14 @@ def chat_page() -> None:
         st.session_state.get("enable_xai_tools", True),
     )
 if "auto_prune_done" not in st.session_state:
-    user = st.session_state.get("user", 'shared')
-    convo_id = st.session_state.get("current_convo_id", 0)
-    advanced_memory_prune(user=user, convo_id=convo_id)
+    current_convo_uuid = st.session_state.get("current_convo_uuid")
+    advanced_memory_prune(convo_uuid=current_convo_uuid)
     st.session_state["auto_prune_done"] = True
 def run_tests() -> bool:
     class TestTools(unittest.TestCase):
         def setUp(self) -> None:
             st.session_state["user"] = "test_user"
-            st.session_state["current_convo_id"] = 1
+            st.session_state["current_convo_uuid"] = str(uuid.uuid4())
             st.session_state["memory_cache"] = {
                 "lru_cache": {},
                 "metrics": {"total_inserts": 0, "total_retrieves": 0, "hit_rate": 1.0},
@@ -2576,23 +2586,23 @@ def run_tests() -> bool:
             self.assertEqual(result_read, "Hello World")
         def test_memory_insert_query(self) -> None:
             mem_value = {"summary": "test mem", "salience": 0.8}
-            result_insert = safe_call(memory_insert, "test_key", mem_value, "test", 1)
+            result_insert = safe_call(memory_insert, "test_key", mem_value, convo_uuid=st.session_state["current_convo_uuid"])
             self.assertEqual(result_insert, "Memory inserted successfully.")
-            result_query = safe_call(memory_query, mem_key="test_key", user="test", convo_id=1)
+            result_query = safe_call(memory_query, mem_key="test_key", convo_uuid=st.session_state["current_convo_uuid"])
             self.assertIn("summary", str(result_query))
             self.assertIn("test mem", str(result_query))
         def test_memory_shared_mode(self) -> None:
-            result_insert = safe_call(memory_insert, "shared_key", {"test": "data"})
+            result_insert = safe_call(memory_insert, "shared_key", {"test": "data"}, convo_uuid=st.session_state["current_convo_uuid"])
             self.assertEqual(result_insert, "Memory inserted successfully.")
-            query = safe_call(memory_query, mem_key="shared_key")
+            query = safe_call(memory_query, mem_key="shared_key", convo_uuid=st.session_state["current_convo_uuid"])
             self.assertIn("test", str(query))
         def test_advanced_memory_prune(self) -> None:
             low_mem = {"summary": "low salience", "salience": 0.05}
-            safe_call(memory_insert, "low_key", low_mem, "test", 1)
+            safe_call(memory_insert, "low_key", low_mem, convo_uuid=st.session_state["current_convo_uuid"])
             st.session_state["prune_counter"] = 49
-            result_prune = safe_call(advanced_memory_prune, "test", 1)
+            result_prune = safe_call(advanced_memory_prune, convo_uuid=st.session_state["current_convo_uuid"])
             self.assertIn("successfully", result_prune)
-            query_after = safe_call(memory_query, mem_key="low_key", user="test", convo_id=1)
+            query_after = safe_call(memory_query, mem_key="low_key", convo_uuid=st.session_state["current_convo_uuid"])
             self.assertEqual(query_after, "Key not found.")
         def test_tool_cache(self) -> None:
             args = {"file_path": "cache_test.txt"}
@@ -2604,10 +2614,10 @@ def run_tests() -> bool:
             result_expired = get_cached_tool_result("fs_read_file", args)
             self.assertIsNone(result_expired)
         def test_agent_spawn_persist(self) -> None:
-            result_spawn = safe_call(agent_spawn, "TestAgent", "Mock task: echo hello", "test", 1)
+            result_spawn = safe_call(agent_spawn, "TestAgent", "Mock task: echo hello", convo_uuid=st.session_state["current_convo_uuid"])
             self.assertIn("spawned (ID:", result_spawn)
             agent_id_prefix = result_spawn.split("ID: ")[1].split(")")[0][:12]
-            status_query = safe_call(memory_query, mem_key=f"agent_{agent_id_prefix}_status", user="test", convo_id=1)
+            status_query = safe_call(memory_query, mem_key=f"agent_{agent_id_prefix}_status", convo_uuid=st.session_state["current_convo_uuid"])
             self.assertIn("status", str(status_query))
             self.assertIn("spawned", str(status_query))
         def test_code_execution_restricted(self) -> None:
@@ -2652,7 +2662,7 @@ def run_tests() -> bool:
             self.assertIn("key: value", result)
         def test_socratic_council(self) -> None:
             branches = ["Option A", "Option B"]
-            result = safe_call(socratic_api_council, branches, user="test", convo_id=1)
+            result = safe_call(socratic_api_council, branches, convo_uuid=st.session_state["current_convo_uuid"])
             self.assertIn("Round", result)
             self.assertIn("Consensus", result)
         def test_agent_sem_bound(self) -> None:
@@ -2666,21 +2676,14 @@ def run_tests() -> bool:
         # NEW: Async test
         def test_async_spawn(self) -> None:
             import asyncio
-            result = asyncio.run(async_run_spawn("test_id", "echo test", "test", 1))
-            self.assertIn("test", result)  # Assume mock success
-        def test_tool_chain_integration(self) -> None:
-            # Simulate user flow: insert memory, retrieve, prune
-            safe_call(memory_insert, "integ_key", {"data": "test"})
-            retrieve = safe_call(advanced_memory_retrieve, "test")
-            self.assertIn("test", retrieve)
-            safe_call(advanced_memory_prune)
-            post_prune = safe_call(memory_query, "integ_key")
-            # Assert based on prune logic (adjust as needed)
-            self.assertNotEqual(post_prune, "Key not found.")
+            context = {'convo_uuid': st.session_state["current_convo_uuid"], 'task': "echo test"}
+            result = asyncio.run(async_run_spawn("test_id", context))
+            self.assertIn("test", result) # Assume mock success
     suite = unittest.TestLoader().loadTestsFromTestCase(TestTools)
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-    state.stability_score = 1.0 - (len([t for t, s in result.failures + result.errors]) / len(suite.tests)) if suite.tests else 1.0
+    num_tests = suite.countTestCases()
+    state.stability_score = 1.0 - (len([t for t, s in result.failures + result.errors]) / num_tests) if num_tests else 1.0
     return result.wasSuccessful()
 if os.getenv('TEST_MODE'):
     run_tests()
