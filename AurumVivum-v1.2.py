@@ -28,6 +28,8 @@ import networkx as nx
 import ntplib
 import numpy as np
 import pulp as PuLP
+import qutip
+import qiskit
 import pygame
 import pygit2
 import requests
@@ -80,7 +82,7 @@ class Config(Enum):
     STABILITY_PENALTY = 0.05
     MAX_ITERATIONS = 100
     TOOL_CALL_LIMIT = 200 # Bumped from 100
-    API_CALLS_PER_MIN = 10
+    API_CALLS_PER_MIN = 50
     TOOL_CALLS_PER_MIN = 50
 class Models(Enum):
     GROK_FAST_REASONING = "grok-4-1-fast-reasoning"
@@ -121,8 +123,8 @@ class AppState:
     This singleton handles initialization, connections, and cleanup for shared state.
     """
     def __init__(self):
-        self.db_path = "sandbox/db/chatapp.db"
-        self.chroma_path = "./sandbox/db/chroma_db"
+        self.db_path = "sandbox/chatapp.db"
+        self.chroma_path = "./sandbox/chroma_db"
         self.chroma_client = None
         self.chroma_collection = None
         self.yaml_collection = None
@@ -150,7 +152,7 @@ class AppState:
                     f.write(content)
         self.sandbox_dir = "./sandbox"
         os.makedirs(self.sandbox_dir, exist_ok=True)
-        self.yaml_dir = "./sandbox/evo_system/fragments"
+        self.yaml_dir = "./sandbox/config/*"
         os.makedirs(self.yaml_dir, exist_ok=True)
         self.agent_dir = os.path.join(self.sandbox_dir, "agents")
         os.makedirs(self.agent_dir, exist_ok=True)
@@ -229,15 +231,6 @@ class AppState:
                 self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_uuid ON memory (uuid)")
             
                 self.cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES ('shared', ?)", (hash_password(''),))
-                # Migration: Backfill UUIDs for existing (run once on init)
-                self.cursor.execute("SELECT convo_id, user FROM history WHERE uuid IS NULL")
-                for row in self.cursor.fetchall():
-                    new_uuid = str(uuid.uuid4())
-                    self.cursor.execute("UPDATE history SET uuid=? WHERE convo_id=?", (new_uuid, row[0]))
-                    # Migrate memory: Assign UUID based on old user/convo
-                    old_user = row[1]
-                    old_convo = row[0]
-                    self.cursor.execute("UPDATE memory SET uuid=? WHERE user=? AND convo_id=?", (new_uuid, old_user, old_convo))
                 self.conn.commit()
         except sqlite3.Error as e: # FIX: Phase 1 - Specific.
             logger.error(f"DB init error: {e}")
@@ -597,7 +590,10 @@ def execute_local(code: str, redirected_output: io.StringIO) -> str:
         result = RestrictedPython.compile_restricted_exec(code) # <-- Add this missing line
         if result.errors:
             return f"Restricted compile error: {result.errors}"
-        exec(result.code, st.session_state["repl_namespace"], {})
+        try:
+            exec(result.code, st.session_state["repl_namespace"], {})
+        except Exception as e:
+            return f"Exec error: {traceback.format_exc()}"
     except Exception as e:
         return f"Restricted exec error: {e}"
     return redirected_output.getvalue()
@@ -659,18 +655,19 @@ def memory_insert(
         return f"Error inserting memory: {e}"
 def load_into_lru(key: str, entry: dict, convo_uuid: str) -> None:
     cache_key = f"{convo_uuid}_{key}"
-    if cache_key not in state.memory_cache["lru_cache"]:
-        state.memory_cache["lru_cache"][cache_key] = {
-            "entry": {
-                "summary": entry.get("summary", ""),
-                "details": entry.get("details", ""),
-                "tags": entry.get("tags", []),
-                "domain": entry.get("domain", "general"),
-                "timestamp": entry.get("timestamp", datetime.now().isoformat()),
-                "salience": entry.get("salience", 1.0),
-            },
-            "last_access": time.time(),
-        }
+    with state.chroma_lock:  # Lock added for consistency
+        if cache_key not in state.memory_cache["lru_cache"]:
+            state.memory_cache["lru_cache"][cache_key] = {
+                "entry": {
+                    "summary": entry.get("summary", ""),
+                    "details": entry.get("details", ""),
+                    "tags": entry.get("tags", []),
+                    "domain": entry.get("domain", "general"),
+                    "timestamp": entry.get("timestamp", datetime.now().isoformat()),
+                    "salience": entry.get("salience", 1.0),
+                },
+                "last_access": time.time(),
+            }
 @inject_convo_uuid
 def memory_query(
     mem_key: str = None, limit: int = Config.DEFAULT_TOP_K.value, convo_uuid: str = None, uuid_list: list[str] = None
@@ -846,9 +843,9 @@ def advanced_memory_retrieve(
                         break
             if not results.get("ids") or not results["ids"][0]: # Still empty? Seed but return short
                 logger.info("Seeding empty DB.")
-                example_data = {"summary": "Initial seed memory", "details": "Welcome!"}
+                example_data = {"summary": "Initial welcome messaage", "details": "Welcome to the AurumVivum Realm! It´s powers are yours!"}
                 advanced_memory_consolidate("seed_key", example_data, convo_uuid=convo_uuid)
-                return "No relevant memories found."
+                return "No recent memories found."
         retrieved = process_chroma_results(results, top_k)
         if len(retrieved) > 5:
             viz_result = viz_memory_lattice(convo_uuid, top_k=len(retrieved))
@@ -861,8 +858,8 @@ def advanced_memory_retrieve(
         logger.info(f"Memory retrieved for query: {query}")
         return result
     except Exception as e:
-        logger.error(f"Error retrieving memory: {traceback.format_exc()}")
-        return "No relevant memories found."
+        logger.error(f"Memory Glitch: {traceback.format_exc()}")
+        return "No memories found."
 def fallback_to_keyword(query: str, top_k: int, convo_uuid: str, uuid_list: list[str]) -> list | str:
     fallback_results = keyword_search(query, top_k, convo_uuid=convo_uuid, uuid_list=uuid_list)
     if isinstance(fallback_results, str) and "error" in fallback_results.lower():
@@ -1146,7 +1143,7 @@ async def async_run_spawn(agent_id: str, context: dict, model: str = Models.GROK
                     client.chat.completions.create(
                         model=model,
                         messages=[
-                            {"role": "system", "content": f"You are an agent for AurumVivum. Execute the given task/query/scenario/simulation. Use this UUID for memory: {convo_uuid}. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
+                            {"role": "system", "content": f"You are an agent for the  AurumVivum system. Execute the given task/query/scenario/simulation. Use this UUID for memory: {convo_uuid}. Suggest tool-chains if needed, but do not call tools yourself. Respond concisely."},
                             {"role": "user", "content": task}
                         ],
                         stream=False,
@@ -1320,12 +1317,14 @@ def agent_spawn(sub_agent_type: str, task: str, convo_uuid: str, poll_interval: 
         return "Poll timeout."
     return f"Agent '{sub_agent_type}' spawned (ID: {agent_id}). Poll 'agent_{agent_id}_complete' for results. Status: {status_key}"
 def render_agent_fleet() -> None:
-    pending = get_state("pending_notifies", [])
+    with state.session_lock:  # Lock added
+        pending = get_state("pending_notifies", [])
     if pending:
         st.subheader("Recent Notifies")
         for notify in pending:
             st.info(f"**{notify['agent_id']}**: {notify['status']} – Task: {notify['task']}")
-        st.session_state["pending_notifies"] = []
+        with state.session_lock:  # Lock added
+            st.session_state["pending_notifies"] = []
     user = st.session_state.get("user")
     convo_uuid = st.session_state.get("current_convo_uuid")
     if user and convo_uuid:
@@ -1738,16 +1737,39 @@ def isolated_subprocess(cmd: str, custom_env: dict = None) -> str:
         logger.error(f"Subprocess error: {e}")
         return f"Subprocess error: {e}"
 PIP_WHITELIST = [
-    "numpy", # Pinned for ARM compat if needed
+    "numpy",
     "pandas",
     "matplotlib",
     "scipy",
     "sympy",
     "requests",
     "beautifulsoup4",
-    "qiskit", # Loosened for agents
+    "qutip",
+    "qiskit",
     "torch",
-    "tensorflow", # Added for creativity
+    "tensorflow",
+    "astropy",  # Astronomy/physics simulations; ARM-compatible.
+    "statsmodels",  # Statistical modeling; useful for data analysis.
+    "pulp",  # Optimization (linear programming); already imported as PuLP.
+    "biopython",  # Bioinformatics; safe for bio-related tasks.
+    "pubchempy",  # Chemical database access; complements chemistry tools.
+    "dendropy",  # Phylogenetics; niche but safe for bio/evo sims.
+    "rdkit",  # Cheminformatics; ARM wheels available, useful for molecule modeling.
+    "pyscf",  # Quantum chemistry; extends qiskit/qutip.
+    "polygon-api-client",  # Finance (stock data); matches 'polygon' in interpreter.
+    "coingecko",  # Crypto data; simple API wrapper.
+    "pygame",  # Game development; already imported, fun for agent sims.
+    "chess",  # Chess engine; already imported, for strategy/games.
+    "mido",  # MIDI handling; music generation.
+    "midiutil",  # MIDI utils; pairs with mido.
+    "networkx",  # Graph theory; already imported as nx, core for networks.
+    "python-snappy",  # Compression; matches 'snappy', fast and safe.
+    "pillow",  # Image processing; complements image upload/view tools.
+    "scikit-learn",  # Machine learning; lightweight models, ARM-compatible.
+    "seaborn",  # Data visualization; builds on matplotlib.
+    "control",  # Control systems; engineering/math, safe.
+    "mpmath",  # High-precision math; already imported, extends sympy.
+    "sentence-transformers",  # Embeddings; already used in main, for agent NLP.
 ]
 def pip_install(venv_path: str, packages: list, upgrade: bool = False) -> str:
     tool_limiter_sync()
@@ -1838,25 +1860,29 @@ def yaml_retrieve(
     if not query and not filename:
         return "Error: Provide query or filename."
     if not state.yaml_ready:
-        state._init_yaml_embeddings() # Lazy if not ready
+        state._init_yaml_embeddings()  # Lazy if not ready
     col = state.yaml_collection
     embed_model = state.get_embed_model()
     cache = state.yaml_cache
     try:
         if filename:
+            # Normalize to basename for consistency (if full path passed)
+            filename = os.path.basename(filename)
             if filename in cache:
                 return cache[filename]
-            with state.chroma_lock: # FIX: Phase 1 - Lock.
-                results = col.query(
-                    n_results=1, where={"filename": filename}, include=["documents"]
+            with state.chroma_lock:  # FIX: Phase 1 - Lock.
+                # FIXED: Use col.get(where=...) for exact metadata lookup (no query_embeddings needed)
+                existing = col.get(
+                    where={"filename": filename},
+                    include=["documents", "metadatas"]
                 )
-            if results.get("documents") and results["documents"][0]:
-                content = results["documents"][0][0]
-                cache[filename] = content
-                state.yaml_cache = cache
-                return content
-            else:
-                return "YAML not found."
+                if existing.get("documents") and existing["documents"]:
+                    content = existing["documents"][0]
+                    cache[filename] = content
+                    state.yaml_cache[filename] = content  # Direct assign (better than reassign dict)
+                    return content
+                else:
+                    return "YAML not found."
         else:
             if not query:
                 return "Error: Query required for semantic search."
@@ -1866,7 +1892,7 @@ def yaml_retrieve(
                     raise ValueError("Empty embedding generated.")
             except Exception as e:
                 return f"Embedding gen error: {e} - Fallback to fs_list_files in yaml_dir."
-            with state.chroma_lock: # FIX: Phase 1 - Lock.
+            with state.chroma_lock:  # FIX: Phase 1 - Lock.
                 results = col.query(
                     query_embeddings=[query_emb],
                     n_results=top_k,
@@ -1876,11 +1902,11 @@ def yaml_retrieve(
                 return "No relevant YAMLs found."
             retrieved = [
                 {"filename": meta["filename"], "content": doc, "distance": dist}
-                for meta, doc, dist in zip(
+                for meta, doc, dist in zip(zip(
                     results["metadatas"][0],
                     results["documents"][0],
                     results["distances"][0],
-                )
+                ))
             ]
             return json.dumps(retrieved)
     except Exception as e:
@@ -1933,7 +1959,7 @@ def yaml_refresh(filename: str = None) -> str:
             fnames = []
             for fname in os.listdir(state.yaml_dir):
                 if fname.endswith(".yaml"):
-                    path = os.path.join(self.yaml_dir, fname)
+                    path = os.path.join(state.yaml_dir, fname)
                     try:
                         with open(path, "r", encoding="utf-8") as f:
                             content = f.read()
@@ -2102,8 +2128,9 @@ def _handle_single_tool(tool_call, current_messages, enable_tools) -> typing.Gen
         with state.counter_lock:
             global tool_count
             tool_count += 1
-        st.session_state.setdefault("tool_calls_per_convo", 0)
-        st.session_state["tool_calls_per_convo"] += 1
+        with state.session_lock:
+            st.session_state.setdefault("tool_calls_per_convo", 0)
+            st.session_state["tool_calls_per_convo"] += 1
     logger.info(f"Tool call: {func_name} - Result: {str(result)[:200]}... Stability: {state.stability_score}") # FIX: Phase 3 - Log stability.
     yield f"\n> **Tool Call:** `{func_name}` | **Result:** `{str(result)[:200]}...`\n"
     current_messages.append(
@@ -2278,7 +2305,7 @@ def call_xai_api(
                 yield f"\n{error_msg}"
                 logger.error(f"Unexpected error in API call: {traceback.format_exc()}")
                 break
-            if time.time() - start_time > 300: # FIX: Phase 3 - Cap total
+            if time.time() - start_time > 3600: # FIX: Phase 3 - Cap total
                 yield "Total timeout—aborting."
                 break
     return generate(api_messages)
