@@ -37,6 +37,7 @@ import requests
 import RestrictedPython
 import sqlparse
 import streamlit as st
+from streamlit_ace import st_ace  # ← NEW: Ace editor component
 import sympy
 import tiktoken
 import yaml
@@ -105,13 +106,14 @@ council_count = 0
 
 # Moonshot Models
 class Models(Enum):
+
+    KIMI_K2_THINKING = "kimi-k2-thinking"
+    KIMI_LATEST = "kimi-latest"
+    KIMI_K_THINKING_TURBO = "kimi-k2-thinking-turbo"
+    KIMI_K2 = "kimi-k2"
     MOONSHOT_V1_8K = "moonshot-v1-8k"
     MOONSHOT_V1_32K = "moonshot-v1-32k"
     MOONSHOT_V1_128K = "moonshot-v1-128k"
-    KIMI_LATEST = "kimi-latest"
-    KIMI_K_THINKING_TURBO = "kimi-k2-thinking-turbo"
-    KIMI_K2_THINKING = "kimi-k2-thinking"
-    KIMI_K2_THINKING_PREVIEW = "kimi-k2"
 
 def hash_password(password: str) -> str:
     return sha256_crypt.hash(password)
@@ -180,6 +182,8 @@ def inject_convo_uuid(func):
         kwargs['convo_uuid'] = kwargs.get('convo_uuid', st.session_state.get('current_convo_uuid', str(uuid.uuid4())))
         return func(*args, **kwargs)
     return wrapper
+
+
 
 # Lightweight DI Container for plugin system
 class Container:
@@ -376,6 +380,20 @@ class AppState:
                 key, entry = lru.popitem(last=False)
                 if entry["salience"] < 0.4:
                     memory_cache["lru_cache"].pop(key, None)
+
+def list_sandbox_files() -> list[str]:
+    """
+    Returns a sorted list of relative paths in the sandbox.
+    Folders end with '/' so they can be distinguished and sorted nicely.
+    """
+    base = pathlib.Path(state.sandbox_dir)
+    items = []
+    for path in base.rglob("*"):
+        rel = path.relative_to(base).as_posix()
+        if path.is_dir():
+            rel += "/"
+        items.append(rel)
+    return sorted(items)
 
 # Initialize state
 state = AppState.get()
@@ -2735,6 +2753,10 @@ def render_sidebar() -> None:
             accept_multiple_files=True,
             key="uploaded_images",
         )
+
+        # ← NEW: Workspace toggle
+        st.checkbox("🛠️ Enable Code Workspace", value=True, key="show_workspace")
+
         st.divider()
         tab1, tab2 = st.tabs(["Settings", "Agent Fleet"])
         with tab1:
@@ -2883,7 +2905,137 @@ def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, up
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"], unsafe_allow_html=False)
-    
+
+    # ====================== CODE WORKSPACE ======================
+    if st.session_state.get("show_workspace", False):
+        with st.expander("📂 Code Workspace (./sandbox)", expanded=True):
+            col_browser, col_editor = st.columns([1, 3])
+
+            with col_browser:
+                st.subheader("Files")
+
+                # Helper recursive tree renderer
+                def render_tree(path: pathlib.Path, indent: str = ""):
+                    if not path.exists():
+                        return
+
+                    # Get sorted items: folders first, then files
+                    try:
+                        items = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+                    except PermissionError:
+                        st.error(f"Permission denied: {path}")
+                        return
+
+                    for item in items:
+                        rel_path = item.relative_to(pathlib.Path(state.sandbox_dir)).as_posix()
+                        if item.is_dir():
+                            with st.expander(f"📁 {indent}{item.name}/"):
+                                render_tree(item, indent + "    ")
+                        else:
+                            if st.button(f"📄 {indent}{item.name}", key=f"tree_select_{rel_path}"):
+                                st.session_state["workspace_selected_file"] = rel_path
+                                st.rerun()  # Immediate load of selected file
+
+                # Render the full tree starting from sandbox root
+                render_tree(pathlib.Path(state.sandbox_dir))
+
+                if not any(pathlib.Path(state.sandbox_dir).iterdir()):
+                    st.info("Sandbox is empty – create a file below.")
+
+                st.markdown("---")
+                # New file creation (kept at bottom for easy access)
+                new_name = st.text_input("New filename (e.g. utils/helper.py or deep/nested/file.txt)")
+                col_create, col_refresh = st.columns([3, 1])
+                with col_create:
+                    if st.button("Create File") and new_name.strip():
+                        result = fs_write_file(new_name.strip(), "# New file created in workspace\n")
+                        st.success(result)
+                        st.rerun()
+                with col_refresh:
+                    if st.button("Refresh"):
+                        st.rerun()
+
+            with col_editor:
+                selected = st.session_state.get("workspace_selected_file")
+                if selected and not selected.endswith("/"):
+                    content = fs_read_file(selected)
+
+                    # Language mapping
+                    ext = pathlib.Path(selected).suffix.lower()
+                    lang_map = {
+                        ".py": "python", ".js": "javascript", ".ts": "typescript",
+                        ".html": "html", ".css": "css", ".json": "json",
+                        ".md": "markdown", ".yaml": "yaml", ".yml": "yaml",
+                        ".txt": "text", "": "text"
+                    }
+                    language = lang_map.get(ext, "text")
+
+                    edited = st_ace(
+                        value=content,
+                        language=language,
+                        theme="monokai",
+                        font_size=14,
+                        tab_size=4,
+                        show_gutter=True,
+                        wrap=True,
+                        auto_update=False,
+                        height=600,
+                        key=f"ace_{selected}"
+                    )
+
+                    # Action buttons
+                    b1, b2, b3, b4 = st.columns(4)
+                    with b1:
+                        if st.button("💾 Save", key=f"save_{selected}"):
+                            result = fs_write_file(selected, edited or "")
+                            st.success("Saved!" if "successfully" in result else result)
+                            st.rerun()
+                    with b2:
+                        if st.button("▶️ Run (Python)", key=f"run_{selected}"):
+                            if ext == ".py":
+                                with st.spinner("Executing..."):
+                                    output = code_execution(edited or "")
+                                st.code(output, language="text")
+                            else:
+                                st.warning("Run only works for .py files.")
+                    with b3:
+                        if st.button("🔍 Lint", key=f"lint_{selected}"):
+                            if ext == ".py":
+                                # Simple safe lint via ast checks
+                                lint_code = f"""
+import ast
+code = '''{edited or ""}'''
+try:
+    tree = ast.parse(code)
+    issues = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith('.'):
+            issues.append(f"Line {{node.lineno}}: Relative import")
+        if isinstance(node, ast.Call):
+            func_name = getattr(node.func, 'id', None)
+            if func_name in ['exec', 'eval', 'open']:
+                issues.append(f"Line {{node.lineno}}: Potentially unsafe call")
+    print("\\n".join(issues) if issues else "No obvious issues.")
+except Exception as e:
+    print(f"Error: {{e}}")
+"""
+                                with st.spinner("Linting..."):
+                                    lint_out = code_execution(lint_code)
+                                st.code(lint_out.strip(), language="text")
+                            else:
+                                st.info("Lint only for Python.")
+                    with b4:
+                        if st.button("🗑️ Delete", key=f"del_{selected}"):
+                            if st.checkbox("Confirm delete?", key=f"confirm_{selected}"):
+                                try:
+                                    os.remove(pathlib.Path(state.sandbox_dir) / selected)
+                                    st.success("Deleted.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Delete failed: {e}")
+
+
+    # ====================== CHAT INPUT ======================
     if prompt := st.chat_input("Your command, ape?"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -2906,14 +3058,10 @@ def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, up
             {"role": "assistant", "content": full_response}
         )
         
-        # FIXED: Persist reasoning box with proper state management
+        # Reasoning trace handling (unchanged)
         if "last_reasoning" in st.session_state and st.session_state["last_reasoning"]:
-            expander_key = f"reasoning_{st.session_state['current_convo_uuid']}"
-            
             with st.expander("🔍 View Reasoning Trace", expanded=True):
                 st.code(st.session_state["last_reasoning"], language="text")
-                
-                # Use form to prevent rerun on button press
                 with st.form(key=f"save_reasoning_form_{st.session_state['current_convo_uuid']}"):
                     if st.form_submit_button("💾 Save to Memory"):
                         reasoning_data = {
@@ -2930,11 +3078,11 @@ def render_chat_interface(model: str, custom_prompt: str, enable_tools: bool, up
                         )
                         if "successfully" in result:
                             st.success("✅ Reasoning saved!")
-                            # Clear the reasoning so expander disappears naturally
                             del st.session_state["last_reasoning"]
                         else:
                             st.error(f"Save failed: {result}")
         
+        # Title & history save (unchanged)
         title = gen_title(prompt)
         messages_json = json.dumps(st.session_state.messages)
         if st.session_state.get("current_convo_id", 0) == 0:
